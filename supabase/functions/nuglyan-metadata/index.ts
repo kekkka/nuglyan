@@ -3,9 +3,18 @@ const origin = new Set(["https://kinoteka-veroniki.waxencream256.chatgpt.site","
 const normalize = (v: unknown) => typeof v === "string" ? v.normalize("NFKC").toLowerCase().replace(/ё/g,"е").replace(/[^\p{L}\p{N}]+/gu," ").trim() : "";
 const cleanText=(v:unknown)=>typeof v==="string"?v:null;
 const num=(v:unknown)=>typeof v==="number"&&Number.isFinite(v)?v:null;
-const rating=(v:unknown)=>typeof v==="number"&&v>0&&v<=10?v:null;
+const rating=(v:unknown)=>{const n=typeof v==="number"?v:typeof v==="string"?Number(v):NaN;return Number.isFinite(n)&&n>0&&n<=10?n:null;};
 const url=(v:unknown)=>{try{const u=new URL(String(v));return u.protocol==="https:"?u.href:null;}catch{return null;}};
 const names=(v:unknown)=>Array.isArray(v)?v.flatMap(x=>typeof x?.name==="string"?[x.name]:[]):[];
+const matchesKind=(m:any,expected:boolean|null,allowUnknown=false)=>{
+ if(expected===null)return true;
+ if(typeof m?.isSeries==="boolean")return m.isSeries===expected;
+ const type=String(m?.type||"").toLowerCase();
+ if(["tv-series","animated-series"].includes(type))return expected===true;
+ if(["movie","cartoon"].includes(type))return expected===false;
+ return allowUnknown;
+};
+
 const watchOrigin="https://g1b-13ngdzu.troutcdn.site";
 async function findWatchUrl(id:number,title:string):Promise<string|null>{
  try{
@@ -73,7 +82,7 @@ Deno.serve(async(req)=>{
   if(b.action==="refresh"){
    if(!Number.isSafeInteger(b.providerId)||b.providerId<=0)return out(400,{error:"invalid_provider_id"});
    const detail=await provider("movie/"+b.providerId);
-   if(detail.id!==b.providerId||(year!==null&&detail.year!==year)||detail.isSeries!==series||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+   if(detail.id!==b.providerId||(year!==null&&detail.year!==year)||!matchesKind(detail,series,true)||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
    const metadata={...fields(detail),watchUrl:await findWatchUrl(detail.id,detail.name),fingerprint,fetchedAt:new Date().toISOString()};
    await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
   }
@@ -83,17 +92,17 @@ Deno.serve(async(req)=>{
    const data=await provider("movie/search?limit=10&query="+encodeURIComponent(entry.title.slice(0,200)));
    if(!Array.isArray(data.docs))throw new Error("provider_schema");
    const candidates=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0).map(fields);
-   const exact=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0&&[m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title))&&series!==null&&m.isSeries===series&&(year===null||m.year===year));
+   const exact=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0&&[m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title))&&series!==null&&matchesKind(m,series,false)&&(year===null||m.year===year));
    if(exact.length===1){
     const detail=await provider("movie/"+exact[0].id);
-    if(detail.id!==exact[0].id||(year!==null&&detail.year!==year)||detail.isSeries!==series||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+    if(detail.id!==exact[0].id||(year!==null&&detail.year!==year)||!matchesKind(detail,series,true)||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
     const metadata={...fields(detail),watchUrl:await findWatchUrl(detail.id,detail.name),fingerprint,fetchedAt:new Date().toISOString()};await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
    }
    await save("needs_review",{fingerprint,candidates},null);return out(200,{status:"needs_review",candidates});
   }
   if(!Number.isSafeInteger(b.providerId)||b.providerId<=0)return out(400,{error:"invalid_provider_id"});
   if(cache?.status!=="needs_review"||cache.metadata?.fingerprint!==fingerprint||!cache.metadata?.candidates?.some((x:any)=>x.kinopoiskId===b.providerId))return out(409,{error:"select_from_current_candidates"});
-  const m=await provider("movie/"+b.providerId);if(m.id!==b.providerId||(year!==null&&m.year!==year)||m.isSeries!==series||![m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+  const m=await provider("movie/"+b.providerId);if(m.id!==b.providerId||(year!==null&&m.year!==year)||!matchesKind(m,series,true)||![m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
   const metadata={...fields(m),watchUrl:await findWatchUrl(m.id,m.name),fingerprint,fetchedAt:new Date().toISOString()};await save("ready",metadata,m.id);return out(200,{status:"ready",metadata});
- }catch(e){const code=e instanceof Error?e.message:"unexpected";const safe=/^(budget_exhausted|provider_\d{3}|provider_schema|provider_identity_mismatch|version_conflict|database_\d{3})$/.test(code)?code:"request_failed";return out(safe==="budget_exhausted"?429:safe==="version_conflict"?409:502,{error:safe});}
+ }catch(e){const code=e instanceof Error?e.message:"unexpected";console.error("nuglyan-metadata request failed",code);const safe=/^(budget_exhausted|provider_\d{3}|provider_schema|provider_identity_mismatch|version_conflict|database_\d{3})$/.test(code)?code:"request_failed";return out(safe==="budget_exhausted"?429:safe==="version_conflict"?409:502,{error:safe});}
 });
