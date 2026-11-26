@@ -140,7 +140,7 @@ commit=async function(pub){
   busy=true;editor.querySelectorAll('button,input,textarea,select').forEach(e=>e.disabled=true);
   try{
     x.draft=d;getPending(x).dirty=true;await flush(x);
-    if(pub){const published={...d,pub:true};await rpc('kinoteka_publish',{p_id:x.id,p_version:versions.get(x.id).version,p_card:snapshot(published)},true);Object.assign(x,published);delete x.draft;getPending(x).dirty=true;await flush(x);await loadPublic();go('title/'+x.id);}
+    if(pub){const published={...d,pub:true};delete published.draft;const version=await rpc('nuglyan_commit_card',{p_id:x.id,p_version:versions.get(x.id).version,p_title:published.name.trim(),p_original_json:JSON.stringify(cleanRecord(published)),p_action:'publish',p_card:snapshot(published)},true);versions.get(x.id).version=version;Object.assign(x,published);delete x.draft;feedback.textContent='Карточка опубликована';try{await loadPublic();go('title/'+x.id);}catch(e){feedback.textContent='Карточка опубликована. Не удалось обновить каталог; обновите страницу.';}}
     else feedback.textContent='Черновик сохранён на сервере';
   }catch(e){feedback.textContent=e.message+'; скачайте резервную копию при необходимости.';}
   finally{busy=false;editor.querySelectorAll('button,input,textarea,select').forEach(e=>e.disabled=false);}
@@ -148,7 +148,7 @@ commit=async function(pub){
 unpublish=async function(){
   if(!admin||busy||!window.current)return;
   const x=window.current;if(!confirm('Снять карточку с публикации?'))return;busy=true;
-  try{await flush(x);await rpc('kinoteka_unpublish',{p_id:x.id,p_version:versions.get(x.id).version},true);x.pub=false;getPending(x).dirty=true;await flush(x);await loadPublic();go('library');}catch(e){alert(e.message);}finally{busy=false;}
+  try{await flush(x);const next={...x,pub:false};const version=await rpc('nuglyan_commit_card',{p_id:x.id,p_version:versions.get(x.id).version,p_title:(next.draft?.name||next.name).trim(),p_original_json:JSON.stringify(cleanRecord(next)),p_action:'unpublish',p_card:null},true);versions.get(x.id).version=version;x.pub=false;try{await loadPublic();}catch(e){alert('Публикация снята, но каталог не обновился. Обновите страницу.');}go('library');}catch(e){alert(e.message);}finally{busy=false;}
 };
 startCard=function(){
   app.innerHTML='<h1>Новое произведение</h1><form class="panel createCard"><label>Название<input name="title" required autocomplete="off"></label><label>Формат<select name="kind"><option>Сериал</option><option>Фильм</option></select></label><button class="primary">Добавить в медиатеку</button><p role="status"></p></form>';
