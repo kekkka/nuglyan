@@ -169,6 +169,77 @@ reviewList=function(record){
   if(!content)return '<p>Рецензия появится после публикации.</p>';
   return (review?'':'<small class="muted">Из таблицы · пересказ впечатлений</small>')+'<ul class="reviewPoints">'+content.split(/\r?\n/).map(line=>'<li>'+esc(line)+'</li>').join('')+'</ul>';
 };
+
+/* Free, server-backed search over public cards only. */
+let searchMode='recommend', searchResult={key:'',state:'idle',hits:new Map(),message:''}, searchRun=0;
+function parseSearch(raw,kind,mode){
+  const clean=String(raw).trim().slice(0,200), norm=clean.toLowerCase().replaceAll('ё','е');
+  const selected=kind==='Фильм'?'film':kind==='Сериал'?'series':null;
+  if(mode==='title')return {term:clean,type:selected,strict:false,excluded:'',unsupported:false};
+  const film=/(^|\s)фильм(?:ы|а|ов)?(?=$|[\s,.!?])/.test(norm), series=/(^|\s)сериал(?:ы|а|ов)?(?=$|[\s,.!?])/.test(norm);
+  let term=norm, strict=false, excluded='';
+  term=term.replace(/(?:^|\s)без\s+мистик[аиу]?(?=$|[\s,.!?])/g,()=>{strict=true;return ' ';});
+  term=term.replace(/(?:^|\s)без\s+([а-яa-z-]+(?:\s+[а-яa-z-]+)?)[.!?]*$/g,(_,v)=>{excluded=v;return ' ';});
+  const unsupported=/(?:^|\s)(?:без|не|кроме)(?=$|\s)/.test(term);
+  term=term.replace(/(?:^|\s)(?:хочу|посмотреть|смотреть|подбери|покажи|найди|пожалуйста|что-нибудь|что-то|мне|кино|фильмы?|сериалы?|вечером|вечер|посоветуй|на|для)(?=$|[\s,.!?])/g,' ').replace(/[,.!?;]+/g,' ').replace(/\s+/g,' ').trim();
+  return {term,type:selected||(film&&!series?'film':series&&!film?'series':null),strict,excluded,unsupported};
+}
+const searchKey=()=>JSON.stringify([q,kind,searchMode]);
+const isCatalogRoute=()=>!['library','new','edit','title'].includes(location.hash.slice(1).split('/')[0]);
+async function runCatalogSearch(key){
+  const run=++searchRun,mode=searchMode,p=parseSearch(q,kind,mode);
+  searchResult={key,state:'loading',hits:new Map(),message:''};
+  try{
+    let rows=[],message='';
+    const eligible=x=>(!p.type||(x.kind==='Фильм'?'film':'series')===p.type)&&(!p.strict||x.noMystic===true);
+    if(p.unsupported){message='Уточни запрос: например «детектив без мистики». Другие отрицательные условия пока не поддерживаются полностью.';}
+    else if(!p.term&&!p.strict&&!p.excluded){message='Добавь название, тему или настроение.';}
+    else if(!p.term&&!p.strict){message='Добавь тему или жанр к исключению.';}
+    else if(!p.term){rows=publicRows.filter(eligible).map(x=>({entry_id:x.id,score:1,reasons:['Отсутствие мистики подтверждено автором']}));}
+    else if(mode==='title'){rows=await rpc('kinoteka_search',{p_query:p.term,p_type:p.type,p_limit:50,p_offset:0});}
+    else{
+      rows=await rpc('kinoteka_recommend',{p_query:p.term,p_type:p.type,p_exclude:p.excluded,p_limit:30});
+      const exact=publicRows.filter(x=>eligible(x)&&!p.excluded&&x.name.toLowerCase().replaceAll('ё','е')===p.term);
+      for(const x of exact){rows=rows.filter(r=>r.entry_id!==x.id);rows.unshift({entry_id:x.id,score:1000,reasons:['Точное совпадение названия']});}
+    }
+    const lookup=new Map(publicRows.map(x=>[x.id,x]));
+    const hits=new Map(rows.filter(r=>lookup.has(r.entry_id)&&eligible(lookup.get(r.entry_id))).map(r=>[r.entry_id,{score:Math.max(0.01,Number(r.score??r.relevance)||0),reasons:list(r.reasons).length?list(r.reasons):['Совпадение в каталоге']}]));
+    if(p.strict&&!p.unsupported)message='Показываем только карточки с подтверждённым автором отсутствием мистики.';
+    if(p.excluded)message+=(message?' ':'')+'Исключение по упоминаниям: '+p.excluded+'. Отсутствие темы не гарантируется.';
+    if(run!==searchRun||key!==searchKey())return;
+    searchResult={key,state:'done',hits,message};
+  }catch(e){if(run!==searchRun||key!==searchKey())return;searchResult={key,state:'error',hits:new Map(),message:'Поиск временно недоступен. Попробуй ещё раз.'};}
+  if(isCatalogRoute()){
+    const input=app.querySelector('input[name=query]'),draft=input?.value;
+    render();
+    if(draft!==undefined&&draft!==q){const next=app.querySelector('input[name=query]');if(next)next.value=draft;}
+  }
+}
+search=function(value){q=String(value||'').trim().slice(0,200);searchRun++;searchResult={key:'',state:'idle',hits:new Map(),message:''};render();};
+function setSearchMode(mode){searchMode=mode;search(q);}
+rank=function(x){return !q?1:(searchResult.hits.get(x.id)?.score||0);};
+const originalSearchCard=card, originalCatalog=catalog;
+card=function(x){
+  if(!q||!searchResult.hits.has(x.id))return originalSearchCard(x);
+  const hit=searchResult.hits.get(x.id);
+  return '<article>'+link('title/'+x.id,'<div class="poster">'+img(x)+'<div class="cap"><small>'+esc([x.year,x.genre].filter(Boolean).join(' · '))+'</small><strong>'+esc(x.name)+'</strong></div></div>')+'<p class="reason">'+hit.reasons.map(esc).join(' · ')+(x.atmos?' · '+esc(x.atmos):'')+'</p></article>';
+};
+catalog=function(){
+  if(q&&searchResult.key!==searchKey())runCatalogSearch(searchKey());
+  originalCatalog();
+  const bar=app.querySelector('.bar');
+  if(bar)bar.insertAdjacentHTML('beforebegin','<div class="row filters" aria-label="Режим поиска">'+btn('Подбор по настроению',"setSearchMode('recommend')",searchMode==='recommend'?'active':'')+btn('Поиск по каталогу',"setSearchMode('title')",searchMode==='title'?'active':'')+'</div>');
+  const examples=app.querySelector('.examples');if(examples)examples.insertAdjacentHTML('beforeend',btn('Без мистики',"search('Без мистики')"));
+  const input=app.querySelector('input[name=query]');if(input)input.maxLength=200;
+  if(!q)return;
+  const h=bar?.querySelector('h2');if(h&&searchMode==='recommend')h.firstChild.textContent='Подборка для тебя ';
+  const empty=app.querySelector('.grid')?.nextElementSibling;
+  if(searchResult.state==='loading'){if(h?.querySelector('small'))h.querySelector('small').textContent='…';if(empty)empty.textContent='Ищем в коллекции…';}
+  if(searchResult.state==='error'&&empty){empty.textContent=searchResult.message;empty.insertAdjacentHTML('beforeend',' '+btn('Повторить',"search(q)"));}
+  if(searchResult.message&&searchResult.state!=='error')app.querySelector('.grid')?.insertAdjacentHTML('beforebegin','<p class="server-status" role="status">'+esc(searchResult.message)+'</p>');
+  if(searchResult.state==='done'&&searchResult.hits.size)app.insertAdjacentHTML('beforeend','<p class="muted">Поиск по опубликованным карточкам. '+(searchMode==='recommend'?'До 30 совпадений; подбор по словам и авторским оценкам, не гарантия всех пожеланий.':'До 50 совпадений.')+'</p>');
+};
+
 window.addEventListener('beforeunload',e=>{if(unsaved()||busy){e.preventDefault();e.returnValue='';}});
 window.addEventListener('hashchange',()=>{render();scrollTo(0,0);});
 (async()=>{try{await loadPublic();ready=true;render();}catch(e){app.innerHTML='<p class="panel">Не удалось загрузить каталог. <button onclick="location.reload()">Повторить</button></p>';}})();
