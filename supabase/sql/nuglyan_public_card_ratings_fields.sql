@@ -1,0 +1,2 @@
+-- Public rating sync fields; internal review state stays in kinoteka_metadata.status.
+alter table public.kinoteka_publications add constraint public_card_keys check ((card - array['title','originalTitle','type','year','genres','countries','posterUrl','synopsis','authorRating','kinopoiskRating','imdbRating','authorReview','authorNotes','recommended','tags','characteristics','watchLinks','kinopoiskId','imdbId','ratingsUpdatedAt','watchUrl']) = '{}'::jsonb);
