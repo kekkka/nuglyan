@@ -126,7 +126,7 @@ async function signout(){
   session=null;admin=false;privateRows=[];privateIndex={};versions.clear();pending.clear();window.current=null;go('');render();
 }
 const originalLibrary=library,originalEdit=edit;
-library=function(){originalLibrary();app.insertAdjacentHTML('afterbegin','<div class="row admin-tools"><button onclick="downloadBackup()">Экспорт JSON</button><button onclick="refreshPublishedRatings(true)">Обновить оценки Кинопоиска и IMDb</button><button onclick="signout()">Выйти</button><p id="ratingsSyncStatus" class="rating-sync-status" role="status"></p></div>');};
+library=function(){originalLibrary();app.insertAdjacentHTML('afterbegin','<div class="row admin-tools"><button onclick="downloadBackup()">Экспорт JSON</button><button onclick="refreshPublishedRatings()">Обновить оценки Кинопоиска и IMDb</button><button onclick="signout()">Выйти</button><p id="ratingsSyncStatus" class="rating-sync-status" role="status"></p></div>');};
 edit=function(x){originalEdit(x);app.querySelector('#editor').insertAdjacentHTML('beforeend','<button onclick="downloadBackup()">Скачать резервную копию</button>');};
 render=function(){
   if(!ready)return;
@@ -187,23 +187,24 @@ async function refreshPublishedRatings(force=false){
  if(ratingRefreshTask)return ratingRefreshTask;
  ratingRefreshTask=(async()=>{
   const cutoff=Date.now()-30*24*60*60*1000;
-  const mapped=publicRows.filter(x=>x.kinopoiskId);
-  const jobs=mapped.filter(x=>{
+  const jobs=publicRows.filter(x=>{
    if(!force&&(x.ratingsStatus==='ready'||x.ratingsStatus==='needs_review'))return false;
    const fetched=Date.parse(x.ratingsUpdatedAt||'');
-   const bothMissing=x.kinopoiskRating==null&&x.imdbRating==null;
-   return force||bothMissing||!Number.isFinite(fetched)||fetched<cutoff;
+   const hasAnyRating=x.kinopoiskRating!=null||x.imdbRating!=null;
+   const stale=Number.isFinite(fetched)&&fetched<cutoff;
+   // Existing scores without a timestamp are kept; do not re-fetch all 59 already populated cards.
+   return force||(!hasAnyRating)||stale;
   });
   let updated=0,failed=0,skipped=0,needsReview=0;
   const status=()=>document.getElementById('ratingsSyncStatus');
   const report=message=>{if(status())status().textContent=message;};
-  if(!jobs.length){report(mapped.length?'Внешние оценки уже актуальны.':'Не найдено произведений с подтверждённым ID Кинопоиска.');return {updated,failed,skipped,needsReview};}
+  if(!jobs.length){report(publicRows.length?'Внешние оценки уже актуальны.':'В медиатеке пока нет опубликованных произведений.');return {updated,failed,skipped,needsReview};}
   report('Обновляем оценки: 0 из '+jobs.length+'…');
   for(let i=0;i<jobs.length;i++){
    const pub=jobs[i],record=privateRows.find(x=>x.id===pub.id);
    if(!record){skipped++;report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed+' · пропущено '+skipped);continue;}
    try{
-    if(!record.kinopoiskId)record.kinopoiskId=pub.kinopoiskId;
+    if(!record.kinopoiskId&&pub.kinopoiskId)record.kinopoiskId=pub.kinopoiskId;
     const result=await resolveMetadata(record,{providerId:pub.kinopoiskId,persist:false});
     if(result?.status==='needs_review'){
      record.ratingsStatus='needs_review';
@@ -218,7 +219,7 @@ async function refreshPublishedRatings(force=false){
      updated++;
     }
    }catch(e){failed++;console.warn('Не удалось обновить оценки для '+pub.name+':',e);}
-   report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · ошибок '+failed+' · пропущено '+skipped);
+   report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed+' · пропущено '+skipped);
    await new Promise(resolve=>setTimeout(resolve,180));
   }
   await loadPublic();
@@ -226,7 +227,7 @@ async function refreshPublishedRatings(force=false){
   if(route==='library'){render();report('Готово: обновлено '+updated+' из '+jobs.length+'. На ручной проверке: '+needsReview+'. Ошибок: '+failed+'.');}
   else if(route==='title'){db=publicRows;kpIndex=publicIndex;render();}
   else if(route!=='edit'){db=publicRows;kpIndex=publicIndex;}
-  return {updated,failed,skipped};
+  return {updated,failed,skipped,needsReview};
  })().finally(()=>{ratingRefreshTask=null;});
  return ratingRefreshTask;
 }
