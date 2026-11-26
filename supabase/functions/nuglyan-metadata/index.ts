@@ -61,10 +61,10 @@ Deno.serve(async(req)=>{
    const data=await provider("movie/search?limit=10&query="+encodeURIComponent(entry.title.slice(0,200)));
    if(!Array.isArray(data.docs))throw new Error("provider_schema");
    const candidates=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0).map(fields);
-   const exact=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0&&[m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title))&&year!==null&&m.year===year&&series!==null&&m.isSeries===series);
+   const exact=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0&&[m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title))&&series!==null&&m.isSeries===series&&(year===null||m.year===year));
    if(exact.length===1){
     const detail=await provider("movie/"+exact[0].id);
-    if(detail.id!==exact[0].id||detail.year!==year||detail.isSeries!==series||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+    if(detail.id!==exact[0].id||(year!==null&&detail.year!==year)||detail.isSeries!==series||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
     const metadata={...fields(detail),fingerprint};await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
    }
    await save("needs_review",{fingerprint,candidates},null);return out(200,{status:"needs_review",candidates});
