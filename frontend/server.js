@@ -1,7 +1,7 @@
 /* nuglyan: browser-to-Supabase adapter. No secret/service role key. */
 const BASE='https://ezycipkttvaoasftqpug.supabase.co';
 const KEY='sb_publishable_9XR2EtcnLTfxUj4l8iLYOA_VVV0oGFn';
-let session=null, admin=false, publicRows=[], privateRows=[], publicIndex={}, privateIndex={}, ready=false, refreshTask=null, busy=false;
+let session=null, admin=false, publicRows=[], privateRows=[], publicIndex={}, privateIndex={}, ready=false, refreshTask=null, busy=false, ratingsReviewById=new Map();
 const pending=new Map(), versions=new Map();
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const copy=v=>JSON.parse(JSON.stringify(v));
@@ -54,6 +54,7 @@ async function hydratePrivate(){
   const [rows,meta]=await Promise.all([readAll('/rest/v1/kinoteka_entries?select=id,source_key,original_json,version&order=created_at.desc,id',true),readAll('/rest/v1/kinoteka_metadata?select=entry_id,metadata,provider_id,status&order=entry_id',true)]);
   const published=new Set(publicRows.map(x=>x.id));
   const metadataById=new Map(meta.map(m=>[m.entry_id,m]));
+  ratingsReviewById=new Map(meta.filter(m=>m.status==='needs_review').map(m=>[m.entry_id,{reason:m.metadata?.reason||null,candidates:Array.isArray(m.metadata?.candidates)?m.metadata.candidates:[],checkedAt:m.metadata?.checkedAt||m.updated_at||null}]));
   privateIndex={};versions.clear();
   for(const m of meta){const k=sourceFor(m.provider_id,m.metadata?.legacy||{fields:m.metadata||{}});if(k)privateIndex[m.entry_id]=k;}
   privateRows=rows.filter(x=>uuid(x.id)).map(row=>{
@@ -125,10 +126,58 @@ async function signout(){
   if(busy)return;
   try{await Promise.all([...pending.values()].map(p=>flush(p.record)));}catch(e){alert('Сначала сохраните или скачайте копию: '+e.message);return;}
   try{await request('/auth/v1/logout',{method:'POST',auth:true});}catch(e){/* local sign-out regardless */}
-  session=null;admin=false;privateRows=[];privateIndex={};versions.clear();pending.clear();window.current=null;go('');render();
+  session=null;admin=false;privateRows=[];privateIndex={};ratingsReviewById.clear();versions.clear();pending.clear();window.current=null;go('');render();
 }
 const originalLibrary=library,originalEdit=edit;
-library=function(){originalLibrary();app.insertAdjacentHTML('afterbegin','<div class="row admin-tools"><button onclick="downloadBackup()">Экспорт JSON</button><button onclick="refreshPublishedRatings()">Обновить оценки Кинопоиска и IMDb</button><button onclick="signout()">Выйти</button><p id="ratingsSyncStatus" class="rating-sync-status" role="status"></p></div>');};
+function ratingCandidateWarnings(record,candidate){
+ const warnings=[];
+ const expectedYear=Number(record.draft?.year||record.year),candidateYear=Number(candidate.year);
+ if(Number.isInteger(expectedYear)&&expectedYear>=1880&&expectedYear<=2100&&Number.isInteger(candidateYear)&&candidateYear>0&&candidateYear!==expectedYear)warnings.push('Год отличается: '+candidateYear+' вместо '+expectedYear);
+ const type=String(candidate.type||'').toLowerCase();
+ const candidateSeries=['tv-series','animated-series'].includes(type)||candidate.isSeries===true;
+ const candidateFilm=['movie','cartoon'].includes(type)||candidate.isSeries===false;
+ if((record.kind==='Сериал'&&candidateFilm)||(record.kind==='Фильм'&&candidateSeries))warnings.push('Другой формат: '+(candidateSeries?'сериал':'фильм'));
+ const norm=v=>String(v||'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^a-z0-9а-я]+/gi,' ').trim();
+ const target=norm(record.draft?.name||record.name);
+ if(target&&![candidate.title,candidate.originalTitle].some(v=>norm(v)===target))warnings.push('Название отличается');
+ return warnings;
+}
+function ratingCandidateMarkup(record,candidate){
+ const id=Number(candidate.kinopoiskId),title=str(candidate.title||candidate.originalTitle||'Без названия');
+ if(!Number.isSafeInteger(id)||id<=0)return '';
+ let poster='';try{const u=new URL(candidate.posterUrl);if(u.protocol==='https:')poster=u.href;}catch{}
+ const type=String(candidate.type||'').toLowerCase();
+ const format=['tv-series','animated-series'].includes(type)||candidate.isSeries===true?'Сериал':['movie','cartoon'].includes(type)||candidate.isSeries===false?'Фильм':'Формат не указан';
+ const warnings=ratingCandidateWarnings(record,candidate);
+ const kpScore=score(candidate.kinopoiskRating),imdbScore=score(candidate.imdbRating);
+ return '<article class="rating-candidate">'+(poster?'<img loading="lazy" src="'+esc(poster)+'" alt="Постер '+esc(title)+'">':'<div class="rating-candidate-poster">Нет постера</div>')+
+ '<div class="rating-candidate-info"><b>'+esc(title)+'</b><small>'+esc([candidate.year&&Number(candidate.year)>0?candidate.year:'Год не указан',format].join(' · '))+'</small><small>Кинопоиск: '+(kpScore===null?'—':kpScore.toFixed(1))+' · IMDb: '+(imdbScore===null?'—':imdbScore.toFixed(1))+'</small>'+
+ (warnings.length?'<small class="rating-warning">'+warnings.map(esc).join(' · ')+'</small>':'<small class="rating-match">Название, год и формат совпадают</small>')+
+ '<button id="rating-pick-'+record.id+'-'+id+'" onclick="selectRatingCandidate(\''+record.id+'\','+id+')">Подтвердить вариант</button></div></article>';
+}
+function ratingReviewMarkup(){
+ const rows=privateRows.filter(x=>x.pub&&x.ratingsStatus==='needs_review');
+ if(!rows.length)return '';
+ const reasonText={provider_year_mismatch:'Год в исходной карточке не совпал с найденной записью.',provider_title_mismatch:'Название найденной записи отличается от названия в медиатеке.',provider_kind_mismatch:'Тип произведения не совпал.',provider_identity_mismatch:'Не удалось подтвердить совпадение по всем признакам.'};
+ return '<section class="panel rating-review-panel"><div class="rating-review-heading"><div><h2>Проверка внешних оценок</h2><p class="muted">Нужно подтвердить, какое произведение соответствует твоей карточке. Авторские заметки и оценки не меняются.</p></div><span class="tag">'+rows.length+' на проверке</span></div>'+
+ '<div class="rating-review-list">'+rows.map(record=>{
+  const review=ratingsReviewById.get(record.id)||{},candidates=Array.isArray(review.candidates)?review.candidates:[];
+  const visible=candidates.slice(0,3),rest=candidates.slice(3);
+  const targetYear=record.draft?.year||record.year||'год не указан';
+  const targetKind=record.draft?.kind||record.kind||'формат не указан';
+  const candidateList=items=>items.map(c=>ratingCandidateMarkup(record,c)).join('');
+  return '<article class="rating-review-item"><div class="rating-review-title"><div><h3>'+esc(record.draft?.name||record.name)+'</h3><small>В медиатеке: '+esc(targetKind)+' · '+esc(targetYear)+'</small></div><span class="tag">Нужно подтвердить</span></div>'+
+   '<p class="muted">'+esc(reasonText[review.reason]||'Автоматическая проверка не смогла однозначно определить произведение.')+'</p>'+
+   (visible.length?'<div class="rating-candidate-grid">'+candidateList(visible)+'</div>':'<p class="muted">Варианты не найдены. Совпадение пока не привязано.</p>')+
+   (rest.length?'<details class="rating-more"><summary>Показать ещё '+rest.length+' вариантов</summary><div class="rating-candidate-grid">'+candidateList(rest)+'</div></details>':'')+
+   '<p class="rating-review-status" id="rating-review-status-'+record.id+'" role="status"></p></article>';
+ }).join('')+'</div></section>';
+}
+library=function(){
+ originalLibrary();
+ app.insertAdjacentHTML('afterbegin','<div class="row admin-tools"><button onclick="downloadBackup()">Экспорт JSON</button><button onclick="refreshPublishedRatings()">Обновить оценки Кинопоиска и IMDb</button><button onclick="signout()">Выйти</button><p id="ratingsSyncStatus" class="rating-sync-status" role="status"></p></div>');
+ app.insertAdjacentHTML('beforeend',ratingReviewMarkup());
+};
 edit=function(x){originalEdit(x);app.querySelector('#editor').insertAdjacentHTML('beforeend','<button onclick="downloadBackup()">Скачать резервную копию</button>');};
 render=function(){
   if(!ready)return;
@@ -165,8 +214,9 @@ unpublish=async function(){
 async function resolveMetadata(record,options={}){
  if(!admin||!session||!record?.id)return null;
  const year=Number(record.draft?.year||record.year);
- const body={action:options.providerId?'refresh':'search',entryId:record.id,year:Number.isInteger(year)&&year>=1880&&year<=2100?year:null,isSeries:record.kind==='Сериал'};
+ const body={action:options.action||(options.providerId?'refresh':'search'),entryId:record.id,year:Number.isInteger(year)&&year>=1880&&year<=2100?year:null,isSeries:record.kind==='Сериал'};
  if(options.providerId)body.providerId=Number(options.providerId);
+ if(options.confirmed===true)body.confirmed=true;
  const response=await fetch(BASE+'/functions/v1/nuglyan-metadata',{method:'POST',headers:{apikey:KEY,Authorization:'Bearer '+session.access_token,'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'});
  const result=await response.json().catch(()=>({error:'invalid_response'}));
  if(!response.ok)throw Error(result.error||'Не удалось получить внешние оценки');
@@ -182,6 +232,50 @@ async function resolveMetadata(record,options={}){
    if(window.current?.id===record.id)await loadExtras(record,true);
  }
  return result;
+}
+async function selectRatingCandidate(entryId,providerId){
+ if(!admin||!session||busy)return;
+ const record=privateRows.find(x=>x.id===entryId&&x.pub);
+ const review=ratingsReviewById.get(entryId);
+ const candidate=review?.candidates?.find(x=>Number(x.kinopoiskId)===Number(providerId));
+ if(!record||!candidate){alert('Вариант устарел. Обнови страницу медиатеки и попробуй снова.');return;}
+ const title=str(candidate.title||candidate.originalTitle||'Без названия');
+ const format=String(candidate.type||'').toLowerCase();
+ const kind=['tv-series','animated-series'].includes(format)||candidate.isSeries===true?'сериал':['movie','cartoon'].includes(format)||candidate.isSeries===false?'фильм':'формат не определён';
+ const warnings=ratingCandidateWarnings(record,candidate);
+ const warningText=warnings.length?'\n\nВнимание: '+warnings.join('; ')+'.':'';
+ if(!confirm('Подтвердить привязку «'+title+'» ('+(candidate.year||'год не указан')+', '+kind+') к карточке «'+(record.draft?.name||record.name)+'»?'+warningText+'\n\nПосле подтверждения оценки Кинопоиска и IMDb появятся в карточке.'))return;
+ const localStatus=document.getElementById('rating-review-status-'+entryId);
+ const button=document.getElementById('rating-pick-'+entryId+'-'+providerId);
+ if(button)button.disabled=true;
+ if(localStatus)localStatus.textContent='Проверяем выбранную запись и сохраняем оценки…';
+ busy=true;
+ try{
+  const result=await resolveMetadata(record,{providerId,action:'select',confirmed:true,persist:false});
+  if(result?.status!=='ready'||!result.metadata?.kinopoiskId)throw Error(result?.error||'Не удалось подтвердить выбранный вариант');
+  record.ratingsStatus='ready';
+  const versionState=versions.get(record.id);
+  if(!versionState)throw Error('Не найдена версия карточки. Обнови страницу и повтори попытку.');
+  const nextVersion=await rpc('nuglyan_commit_card',{
+   p_id:record.id,p_version:versionState.version,
+   p_title:str(record.draft?.name||record.name).trim(),
+   p_original_json:JSON.stringify(cleanRecord(record)),
+   p_action:'publish',p_card:snapshot(record)
+  },true);
+  versionState.version=nextVersion;
+  ratingsReviewById.delete(record.id);
+  await loadPublic();
+  await hydratePrivate();
+  db=privateRows;kpIndex=privateIndex;
+  render();
+  const status=document.getElementById('ratingsSyncStatus');
+  if(status)status.textContent='Совпадение подтверждено: '+(record.draft?.name||record.name)+'. Оценки сохранены.';
+ }catch(e){
+  if(localStatus)localStatus.textContent='Не удалось сохранить: '+e.message;
+  const status=document.getElementById('ratingsSyncStatus');
+  if(status)status.textContent='Ошибка проверки: '+e.message;
+  if(button)button.disabled=false;
+ }finally{busy=false;}
 }
 let ratingRefreshTask=null;
 async function refreshPublishedRatings(force=false){
@@ -214,10 +308,12 @@ async function refreshPublishedRatings(force=false){
      // Candidate list and review state are already persisted in kinoteka_metadata.
      // Do not republish a public card just to store an internal review flag.
      record.ratingsStatus='needs_review';
+     ratingsReviewById.set(record.id,{reason:result.reason||null,candidates:Array.isArray(result.candidates)?result.candidates:[],checkedAt:new Date().toISOString()});
      needsReview++;
     }else{
      if(result?.status!=='ready')throw Error('metadata_not_ready');
      record.ratingsStatus='ready';
+     ratingsReviewById.delete(record.id);
      const version=await rpc('nuglyan_commit_card',{p_id:record.id,p_version:versions.get(record.id).version,p_title:str(record.draft?.name||record.name).trim(),p_original_json:JSON.stringify(cleanRecord(record)),p_action:'publish',p_card:snapshot(record)},true);
      versions.get(record.id).version=version;
      updated++;
