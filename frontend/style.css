@@ -56,3 +56,6 @@
 
 /* External viewing link */
 .watch-action{display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin-top:22px}.watch-button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;background:#ef6455;color:#191414;font-weight:650;padding:12px 24px;border-radius:12px}.watch-button:hover{filter:brightness(1.05);opacity:1}.watch-button:focus-visible{outline:2px solid currentColor;outline-offset:3px}.watch-action small{font-size:12px;line-height:1.35}@media(max-width:600px){.watch-action{margin-top:14px}.watch-button{padding:10px 16px}.watch-action small{max-width:220px}}
+
+/* Updated nuglyan wordmark and external rating sync status */
+.brand{font-size:28px;font-weight:800;letter-spacing:-1.8px;line-height:1;color:inherit}.brand::first-letter{color:#ef6455}.rating-sync-status{flex-basis:100%;margin:0;color:inherit;font-size:13px;opacity:.8}
