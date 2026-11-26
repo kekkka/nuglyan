@@ -27,7 +27,7 @@ async function refreshSession(){
 }
 function publicRecord(row){
   const c=row.card||{},a=c.characteristics||{};
-  return {id:row.entry_id,pub:true,name:str(c.title),kind:c.type==='film'||c.type==='Фильм'?'Фильм':'Сериал',year:c.year,genre:list(c.genres).join(', '),country:list(c.countries).join(', '),desc:str(c.synopsis),note:str(c.authorNotes),review:str(c.authorReview),score:c.authorRating,atmos:str(a.atmos),topic:str(a.topic),answers:a.answers||{},noMystic:a.noMystic===true,...Object.fromEntries(criteria.map(([k])=>[k,a[k]])),kinopoiskId:c.kinopoiskId,kinopoiskRating:c.kinopoiskRating,imdbRating:c.imdbRating,ratingsUpdatedAt:c.ratingsUpdatedAt,watchUrl:c.watchUrl,watchLinks:list(c.watchLinks),recommended:c.recommended===true,legacyFacts:a.facts||{}};
+  return {id:row.entry_id,pub:true,name:str(c.title),kind:c.type==='film'||c.type==='Фильм'?'Фильм':'Сериал',year:c.year,genre:list(c.genres).join(', '),country:list(c.countries).join(', '),desc:str(c.synopsis),note:str(c.authorNotes),review:str(c.authorReview),score:c.authorRating,atmos:str(a.atmos),topic:str(a.topic),answers:a.answers||{},noMystic:a.noMystic===true,...Object.fromEntries(criteria.map(([k])=>[k,a[k]])),kinopoiskId:c.kinopoiskId,kinopoiskRating:c.kinopoiskRating,imdbRating:c.imdbRating,ratingsUpdatedAt:c.ratingsUpdatedAt,ratingsStatus:c.ratingsStatus||null,watchUrl:c.watchUrl,watchLinks:list(c.watchLinks),recommended:c.recommended===true,legacyFacts:a.facts||{}};
 }
 function sourceFor(id,legacy){
   const k=String(id||legacy?.id||'');
@@ -80,7 +80,7 @@ function snapshot(x){
   for(const [i,g] of groups.entries())for(let j=0;j<g.length-1;j++){const key=i+'_'+j;if(typeof x.answers?.[key]==='string')a.answers[key]=x.answers[key];}
   for(const [key] of criteria){const n=score(x[key]);if(n!==null)a[key]=n;}
   for(const key of ['year','director','writer','camera','music','duration','age'])if(typeof k?.fields?.[key]==='string')a.facts[key]=k.fields[key];
-  const card={title:str(x.name),type:x.kind==='Фильм'?'film':'series',year:x.year||null,genres:list(x.genre),countries:list(x.country),synopsis:str(x.desc),authorReview:str(x.review),authorNotes:str(x.note),authorRating:score(x.score),kinopoiskRating:score(x.kinopoiskRating),imdbRating:score(x.imdbRating),ratingsUpdatedAt:x.ratingsUpdatedAt||k?.fields?.fetchedAt||null,watchUrl:k?.fields?.watchUrl||x.watchUrl||null,tags:[str(x.atmos),str(x.topic)].filter(Boolean),characteristics:a,recommended:x.recommended===true};
+  const card={title:str(x.name),type:x.kind==='Фильм'?'film':'series',year:x.year||null,genres:list(x.genre),countries:list(x.country),synopsis:str(x.desc),authorReview:str(x.review),authorNotes:str(x.note),authorRating:score(x.score),kinopoiskRating:score(x.kinopoiskRating),imdbRating:score(x.imdbRating),ratingsUpdatedAt:x.ratingsUpdatedAt||k?.fields?.fetchedAt||null,ratingsStatus:x.ratingsStatus||null,watchUrl:k?.fields?.watchUrl||x.watchUrl||null,tags:[str(x.atmos),str(x.topic)].filter(Boolean),characteristics:a,recommended:x.recommended===true};
   if(k)card.kinopoiskId=k.id;
   return card;
 }
@@ -189,32 +189,41 @@ async function refreshPublishedRatings(force=false){
   const cutoff=Date.now()-30*24*60*60*1000;
   const mapped=publicRows.filter(x=>x.kinopoiskId);
   const jobs=mapped.filter(x=>{
+   if(!force&&(x.ratingsStatus==='ready'||x.ratingsStatus==='needs_review'))return false;
    const fetched=Date.parse(x.ratingsUpdatedAt||'');
    const bothMissing=x.kinopoiskRating==null&&x.imdbRating==null;
    return force||bothMissing||!Number.isFinite(fetched)||fetched<cutoff;
   });
-  let updated=0,failed=0,skipped=0;
+  let updated=0,failed=0,skipped=0,needsReview=0;
   const status=()=>document.getElementById('ratingsSyncStatus');
   const report=message=>{if(status())status().textContent=message;};
-  if(!jobs.length){report(mapped.length?'Внешние оценки уже актуальны.':'Не найдено произведений с подтверждённым ID Кинопоиска.');return {updated,failed,skipped};}
+  if(!jobs.length){report(mapped.length?'Внешние оценки уже актуальны.':'Не найдено произведений с подтверждённым ID Кинопоиска.');return {updated,failed,skipped,needsReview};}
   report('Обновляем оценки: 0 из '+jobs.length+'…');
   for(let i=0;i<jobs.length;i++){
    const pub=jobs[i],record=privateRows.find(x=>x.id===pub.id);
-   if(!record){skipped++;report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · ошибок '+failed+' · пропущено '+skipped);continue;}
+   if(!record){skipped++;report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed+' · пропущено '+skipped);continue;}
    try{
     if(!record.kinopoiskId)record.kinopoiskId=pub.kinopoiskId;
     const result=await resolveMetadata(record,{providerId:pub.kinopoiskId,persist:false});
-    if(result?.status!=='ready')throw Error('metadata_not_ready');
-    const version=await rpc('nuglyan_commit_card',{p_id:record.id,p_version:versions.get(record.id).version,p_title:str(record.draft?.name||record.name).trim(),p_original_json:JSON.stringify(cleanRecord(record)),p_action:'publish',p_card:snapshot(record)},true);
-    versions.get(record.id).version=version;
-    updated++;
+    if(result?.status==='needs_review'){
+     record.ratingsStatus='needs_review';
+     const version=await rpc('nuglyan_commit_card',{p_id:record.id,p_version:versions.get(record.id).version,p_title:str(record.draft?.name||record.name).trim(),p_original_json:JSON.stringify(cleanRecord(record)),p_action:'publish',p_card:snapshot(record)},true);
+     versions.get(record.id).version=version;
+     needsReview++;
+    }else{
+     if(result?.status!=='ready')throw Error('metadata_not_ready');
+     record.ratingsStatus='ready';
+     const version=await rpc('nuglyan_commit_card',{p_id:record.id,p_version:versions.get(record.id).version,p_title:str(record.draft?.name||record.name).trim(),p_original_json:JSON.stringify(cleanRecord(record)),p_action:'publish',p_card:snapshot(record)},true);
+     versions.get(record.id).version=version;
+     updated++;
+    }
    }catch(e){failed++;console.warn('Не удалось обновить оценки для '+pub.name+':',e);}
    report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · ошибок '+failed+' · пропущено '+skipped);
    await new Promise(resolve=>setTimeout(resolve,180));
   }
   await loadPublic();
   const route=location.hash.slice(1).split('/')[0];
-  if(route==='library'){render();report('Готово: обновлено '+updated+' из '+jobs.length+'. Ошибок: '+failed+'.');}
+  if(route==='library'){render();report('Готово: обновлено '+updated+' из '+jobs.length+'. На ручной проверке: '+needsReview+'. Ошибок: '+failed+'.');}
   else if(route==='title'){db=publicRows;kpIndex=publicIndex;render();}
   else if(route!=='edit'){db=publicRows;kpIndex=publicIndex;}
   return {updated,failed,skipped};
@@ -236,7 +245,7 @@ loadExtras=async function(record,editing){
   const date=record.ratingsUpdatedAt?new Date(record.ratingsUpdatedAt):null;
   const dateLabel=date&&!Number.isNaN(date.getTime())?'Обновлено '+date.toLocaleDateString('ru-RU'):'';
   const dateNode=board.querySelector('.ratingDate');if(dateNode)dateNode.textContent=dateLabel;
-  if(status)status.textContent=kp(record)?'Справка и внешние оценки загружены.':'Точное совпадение в Кинопоиске не найдено; внешние оценки не добавлены.';
+  if(status)status.textContent=record.ratingsStatus==='needs_review'?'Нужно проверить соответствие карточки Кинопоиска.':kp(record)?'Справка и внешние оценки загружены.':'Точное совпадение в Кинопоиске не найдено; внешние оценки не добавлены.';
 };
 reviewList=function(record){
   const review=str(record.review),note=str(record.note),content=review||note;
