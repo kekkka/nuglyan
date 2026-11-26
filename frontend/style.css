@@ -59,3 +59,29 @@
 
 /* Updated nuglyan wordmark and external rating sync status */
 .brand{font-size:28px;font-weight:800;letter-spacing:-1.8px;line-height:1;color:inherit}.brand::first-letter{color:#ef6455}.rating-sync-status{flex-basis:100%;margin:0;color:inherit;font-size:13px;opacity:.8}
+
+/* Admin review of external metadata matches */
+.rating-review-panel{margin-top:24px;padding:24px;background:#fff;color:#191a20;border:1px solid #dfe2e9}
+.rating-review-heading,.rating-review-title{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}
+.rating-review-heading{margin-bottom:18px}
+.rating-review-heading h2{margin-bottom:6px}
+.rating-review-list{display:grid;gap:16px}
+.rating-review-item{padding:18px;border:1px solid #dfe2e9;border-radius:18px;background:#f8f9fc}
+.rating-review-title{margin-bottom:8px}
+.rating-review-title h3{font-size:21px;letter-spacing:-.4px;margin-bottom:4px}
+.rating-review-item>.muted{margin:8px 0 14px}
+.rating-candidate-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:12px}
+.rating-candidate{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;padding:10px;border:1px solid #e0e3e9;border-radius:14px;background:#fff;min-width:0}
+.rating-candidate img,.rating-candidate-poster{width:64px;aspect-ratio:2/3;object-fit:cover;border-radius:8px;background:#e8eaf0}
+.rating-candidate-poster{display:grid;place-items:center;text-align:center;padding:5px;font-size:10px;color:#666}
+.rating-candidate-info{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:0}
+.rating-candidate-info b{font-size:13px;line-height:1.25;overflow-wrap:anywhere}
+.rating-candidate-info small{font-size:11px;line-height:1.35;color:#565a64}
+.rating-candidate-info button{margin-top:auto;padding:7px 10px;border:0;border-radius:10px;background:#f36a5b;color:#171719;font-size:11px;font-weight:700;white-space:normal;text-align:left}
+.rating-warning{color:#a32626!important}
+.rating-match{color:#18734c!important}
+.rating-more{margin-top:12px;background:#edf0f6!important}
+.rating-more summary{font-size:13px}
+.rating-review-status{margin-top:10px;font-size:13px;color:#18734c}
+@media(max-width:900px){.rating-candidate-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.rating-review-panel{padding:14px}.rating-review-heading,.rating-review-title{flex-direction:column}.rating-candidate-grid{grid-template-columns:1fr}.rating-candidate{grid-template-columns:58px minmax(0,1fr)}.rating-candidate img,.rating-candidate-poster{width:58px}}
