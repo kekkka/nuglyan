@@ -24,19 +24,32 @@ function field(t,k,v,area=false){return '<label>'+esc(t)+(area?'<textarea name="
 function edit(x){let d=x.draft||x;app.innerHTML=link('library','‹ Моя медиатека')+'<h1>'+esc(x.name||'Новое произведение')+'</h1><section class="panel" id="editor">'+field('Название','name',d.name)+'<label>Формат <select name="kind"><option>Сериал</option><option '+(d.kind==='Фильм'?'selected':'')+'>Фильм</option></select></label>'+'<details class="reference"><summary>Справка о произведении</summary><p class="sourceStatus" role="status"></p>'+ field('Год','year',d.year)+field('Страна','country',d.country)+field('Жанр','genre',d.genre)+field('Атмосфера','atmos',d.atmos)+field('Темы','topic',d.topic)+field('Сюжет без спойлеров','desc',d.desc,true)+'</details>'+field('Заметки для себя','privateNote',d.privateNote,true)+field('Публичная рецензия','review',d.review,true)+ratingBlock(d,true)+criteria.map(([key,title])=>'<label>'+title+' <input type="number" min="1" max="10" name="'+key+'" value="'+esc(d[key])+'"></label>').join('')+'<h2>Полный разбор</h2>'+renderChapters(d)+'<label><input style="width:auto" name="noMystic" type="checkbox" '+(d.noMystic?'checked':'')+'> Подтверждаю отсутствие мистики</label><div class="row">'+btn('Сохранить черновик','commit(false)')+btn('Опубликовать в каталоге','commit(true)','primary')+(x.pub?btn('Снять с публикации','unpublish()'):'')+'</div><p id="feedback" role="status"></p></section>';window.current=x;bindEditor(x);loadExtras(x,true)}
 function commit(pub){let x=window.current,d={...x,...x.draft,answers:{...(x.draft||x).answers}};delete d.draft;document.querySelectorAll('#editor [name]').forEach(el=>{let k=el.name;if(k.startsWith('state-'))return;if(/^a[0-9]+_/.test(k))d.answers[k.slice(1)]=el.value;else d[k]=el.type==='checkbox'?el.checked:el.value});if(!d.name||document.querySelector('#editor input:invalid')){feedback.textContent='Проверь название и оценку от 1 до 10';return}if(!db.includes(x))db.unshift(x);if(pub){Object.assign(x,d,{pub:true});delete x.draft}else{x.draft=d;if(!x.name)x.name=d.name}save();if(pub)go('title/'+x.id);else{history.replaceState(null,'','#edit/'+x.id);feedback.textContent='Черновик сохранён в этом браузере'}}
 function unpublish(){current.pub=false;save();go('library')}
-function watchUrl(x){
- const candidate=x.watchUrl||kp(x)?.fields?.watchUrl||'';
- const id=String(x.kinopoiskId||kp(x)?.id||'').trim();
- if(!/^[0-9]{1,12}$/.test(id))return null;
- try{
-  const u=new URL(candidate);
-  const path=u.pathname.endsWith('/')?u.pathname.slice(0,-1):u.pathname;
-  if(u.protocol!=='https:'||u.hostname!=='g1b-13ngdzu.troutcdn.site'||path!=='/'+id)return null;
-  return u.href;
- }catch{return null;}
+function safeWatchLink(value){
+ try{const u=new URL(String(value||''));return u.protocol==='https:'?u.href:null;}catch{return null;}
 }
-function watchAction(x){const url=watchUrl(x);return url?'<div class="watch-action"><a class="watch-button" href="'+url+'" target="_blank" rel="noopener noreferrer">Смотреть ↗</a><small class="muted">Откроется сторонний сайт в новой вкладке.</small></div>':''}
-function detail(x){app.innerHTML=link('','‹ В каталог')+'<section class="panel detail">'+('<div class="detailPoster">'+img(x)+'</div>')+'<div><span class="eyebrow">'+esc(x.kind)+'</span><h1>'+esc(x.name)+'</h1><p>'+esc([x.year,x.country,x.genre].filter(Boolean).join(' · '))+'</p>'+watchAction(x)+'</div></section>'+ratingBlock(x,false)+'<div class="row">'+[x.atmos,x.topic,...criteria.filter(([k])=>x[k]).map(([k,t])=>t+' '+x[k]+'/10')].filter(Boolean).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</div><section class="panel"><h2>О произведении</h2><p>'+esc(x.desc||'Описание пока не добавлено.')+'</p></section>'+kpFacts(x)+'<section class="panel"><h2>Авторский разбор</h2>'+reviewList(x)+groups.map(([g,...qs],i)=>{let a=qs.map((t,j)=>x.answers?.[i+'_'+j]?'<p><b>'+esc(t)+'</b><br>'+esc(x.answers[i+'_'+j])+'</p>':'').join('');return a?'<details><summary>'+g+'</summary>'+a+'</details>':''}).join('')+'</section><p class="muted">Подтверждённая ссылка на просмотр пока не добавлена.</p>';loadExtras(x,false)}
+function watchAction(x){
+ const region='LV',regionName='Латвия';
+ const labels={sub:'Подписка',free:'Бесплатно',rent:'Аренда',buy:'Покупка',tve:'ТВ-платформа'};
+ const order={sub:0,free:1,rent:2,buy:3,tve:4};
+ const links=(Array.isArray(x.watchLinks)?x.watchLinks:[]).filter(item=>item&&item.region===region&&safeWatchLink(item.url));
+ links.sort((a,b)=>(order[a.type]??9)-(order[b.type]??9)||String(a.name||'').localeCompare(String(b.name||''),'ru'));
+ const offers=links.map(item=>{
+  const url=safeWatchLink(item.url);
+  const detail=[labels[item.type]||'Доступно',item.price,item.format].filter(Boolean).join(' · ');
+  return '<a class="watch-offer" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer"><span class="watch-offer-copy"><b>'+esc(item.name||'Онлайн-кинотеатр')+'</b><small>'+esc(detail)+'</small></span><span class="watch-arrow">↗</span></a>';
+ }).join('');
+ const id=String(x.kinopoiskId||kp(x)?.id||'').trim();
+ const kpUrl=/^[0-9]{1,12}$/.test(id)?'https://www.kinopoisk.ru/'+(x.kind==='Сериал'?'series':'film')+'/'+id+'/':null;
+ let empty='Ссылки на площадки пока не загружены.';
+ if(x.watchStatus==='ready')empty='В Латвии пока не найдены подтверждённые варианты просмотра.';
+ if(x.watchStatus==='no_identifier')empty='Не удалось подтвердить внешний ID произведения для поиска площадок. Случайные совпадения не подставляем.';
+ return '<section class="panel watch-panel"><div class="watch-heading"><div><h2>Где посмотреть</h2><p class="muted">Доступность для региона: '+regionName+'</p></div></div>'+
+  (offers?'<div class="watch-list">'+offers+'</div>':'<p class="watch-empty">'+esc(empty)+'</p>')+
+  (kpUrl?'<a class="source" href="'+kpUrl+'" target="_blank" rel="noopener noreferrer">Открыть карточку на Кинопоиске ↗</a>':'')+
+  (x.watchStatus==='ready'?'<small class="watch-attribution">Данные о площадках предоставлены <a href="https://www.watchmode.com/" target="_blank" rel="noopener noreferrer">Watchmode</a>. Наличие площадки не гарантирует доступ к контенту: могут потребоваться подписка, аренда или покупка.</small>':'')+
+  '</section>';
+}
+function detail(x){app.innerHTML=link('','‹ В каталог')+'<section class="panel detail">'+('<div class="detailPoster">'+img(x)+'</div>')+'<div><span class="eyebrow">'+esc(x.kind)+'</span><h1>'+esc(x.name)+'</h1><p>'+esc([x.year,x.country,x.genre].filter(Boolean).join(' · '))+'</p></div></section>'+ratingBlock(x,false)+watchAction(x)+'<div class="row">'+[x.atmos,x.topic,...criteria.filter(([k])=>x[k]).map(([k,t])=>t+' '+x[k]+'/10')].filter(Boolean).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</div><section class="panel"><h2>О произведении</h2><p>'+esc(x.desc||'Описание пока не добавлено.')+'</p></section>'+kpFacts(x)+'<section class="panel"><h2>Авторский разбор</h2>'+reviewList(x)+groups.map(([g,...qs],i)=>{let a=qs.map((t,j)=>x.answers?.[i+'_'+j]?'<p><b>'+esc(t)+'</b><br>'+esc(x.answers[i+'_'+j])+'</p>':'').join('');return a?'<details><summary>'+g+'</summary>'+a+'</details>':''}).join('')+'</section>';loadExtras(x,false)}
 function render(){let [p,id]=location.hash.slice(1).split('/');document.body.classList.toggle('light',['library','new','edit'].includes(p));let x=db.find(v=>v.id===id);if(p==='library')library();else if(p==='new')startCard();else if(p==='edit'&&x)edit(x);else if(p==='title'&&x?.pub)detail(x);else catalog()}
 // Initialization is managed by server.js.
 
