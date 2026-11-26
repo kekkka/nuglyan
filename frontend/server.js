@@ -57,7 +57,7 @@ async function hydratePrivate(){
   const [rows,meta]=await Promise.all([readAll('/rest/v1/kinoteka_entries?select=id,source_key,original_json,version&order=created_at.desc,id',true),readAll('/rest/v1/kinoteka_metadata?select=entry_id,metadata,provider_id,status&order=entry_id',true)]);
   const published=new Set(publicRows.map(x=>x.id));
   const metadataById=new Map(meta.map(m=>[m.entry_id,m]));
-  ratingsReviewById=new Map(meta.filter(m=>m.status==='needs_review').map(m=>[m.entry_id,{reason:m.metadata?.reason||null,candidates:Array.isArray(m.metadata?.candidates)?m.metadata.candidates:[],checkedAt:m.metadata?.checkedAt||m.updated_at||null}]));
+  ratingsReviewById=new Map(meta.filter(m=>m.status==='needs_review').map(m=>[m.entry_id,{fingerprint:m.metadata?.fingerprint||null,reason:m.metadata?.reason||null,candidates:Array.isArray(m.metadata?.candidates)?m.metadata.candidates:[],checkedAt:m.metadata?.checkedAt||m.updated_at||null}]));
   privateIndex={};versions.clear();
   for(const m of meta){const k=sourceFor(m.provider_id,m.metadata?.legacy||{fields:m.metadata||{}});if(k)privateIndex[m.entry_id]=k;}
   privateRows=rows.filter(x=>uuid(x.id)).map(row=>{
@@ -246,7 +246,7 @@ async function selectRatingCandidate(entryId,providerId){
  const record=privateRows.find(x=>x.id===entryId&&x.pub);
  const review=ratingsReviewById.get(entryId);
  const candidate=review?.candidates?.find(x=>Number(x.kinopoiskId)===Number(providerId));
- if(!record||!candidate){alert('Вариант устарел. Обнови страницу медиатеки и попробуй снова.');return;}
+ if(!record||!candidate||!review.fingerprint){alert('Вариант устарел. Обнови страницу медиатеки и попробуй снова.');return;}
  const title=str(candidate.title||candidate.originalTitle||'Без названия');
  const format=String(candidate.type||'').toLowerCase();
  const kind=['tv-series','animated-series'].includes(format)||candidate.isSeries===true?'сериал':['movie','cartoon'].includes(format)||candidate.isSeries===false?'фильм':'формат не определён';
@@ -259,18 +259,10 @@ async function selectRatingCandidate(entryId,providerId){
  if(localStatus)localStatus.textContent='Проверяем выбранную запись и сохраняем оценки…';
  busy=true;
  try{
-  const result=await resolveMetadata(record,{providerId,action:'select',confirmed:true,persist:false});
-  if(result?.status!=='ready'||!result.metadata?.kinopoiskId)throw Error(result?.error||'Не удалось подтвердить выбранный вариант');
-  record.ratingsStatus='ready';
   const versionState=versions.get(record.id);
-  if(!versionState)throw Error('Не найдена версия карточки. Обнови страницу и повтори попытку.');
-  const nextVersion=await rpc('nuglyan_commit_card',{
-   p_id:record.id,p_version:versionState.version,
-   p_title:str(record.draft?.name||record.name).trim(),
-   p_original_json:JSON.stringify(cleanRecord(record)),
-   p_action:'publish',p_card:snapshot(record)
-  },true);
-  versionState.version=nextVersion;
+  if(!versionState)throw Error('Обнови страницу и повтори попытку.');
+  const result=await rpc('nuglyan_confirm_cached_rating',{p_id:record.id,p_version:versionState.version,p_provider_id:Number(providerId),p_fingerprint:review.fingerprint},true);
+  if(result!==true)throw Error('Подтверждение не сохранено');
   ratingsReviewById.delete(record.id);
   await loadPublic();
   await hydratePrivate();
@@ -316,7 +308,7 @@ async function refreshPublishedRatings(force=false){
      // Candidate list and review state are already persisted in kinoteka_metadata.
      // Do not republish a public card just to store an internal review flag.
      record.ratingsStatus='needs_review';
-     ratingsReviewById.set(record.id,{reason:result.reason||null,candidates:Array.isArray(result.candidates)?result.candidates:[],checkedAt:new Date().toISOString()});
+     ratingsReviewById.set(record.id,{fingerprint:JSON.stringify([record.draft?.name||record.name,Number(record.draft?.year||record.year)>=1880&&Number(record.draft?.year||record.year)<=2100?Number(record.draft?.year||record.year):null,record.kind==='Сериал']),reason:result.reason||null,candidates:Array.isArray(result.candidates)?result.candidates:[],checkedAt:new Date().toISOString()});
      needsReview++;
     }else{
      if(result?.status!=='ready')throw Error('metadata_not_ready');
