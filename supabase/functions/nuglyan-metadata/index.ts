@@ -6,6 +6,21 @@ const num=(v:unknown)=>typeof v==="number"&&Number.isFinite(v)?v:null;
 const rating=(v:unknown)=>typeof v==="number"&&v>0&&v<=10?v:null;
 const url=(v:unknown)=>{try{const u=new URL(String(v));return u.protocol==="https:"?u.href:null;}catch{return null;}};
 const names=(v:unknown)=>Array.isArray(v)?v.flatMap(x=>typeof x?.name==="string"?[x.name]:[]):[];
+const watchOrigin="https://g1b-13ngdzu.troutcdn.site";
+async function findWatchUrl(id:number,title:string):Promise<string|null>{
+ try{
+  const r=await fetch(watchOrigin+"/"+id,{headers:{"Accept":"text/html"},signal:AbortSignal.timeout(6500),redirect:"follow"});
+  if(!r.ok)return null;
+  const final=new URL(r.url);
+  const path=final.pathname.endsWith("/")?final.pathname.slice(0,-1):final.pathname;
+  if(final.origin!==watchOrigin||path!=="/"+id)return null;
+  const html=(await r.text()).slice(0,200000);
+  const wanted=normalize(title),page=normalize(html);
+  if(!wanted||!page.includes(wanted))return null;
+  return watchOrigin+"/"+id;
+ }catch{return null;}
+}
+
 const fields=(m:any)=>({kinopoiskId:m.id,imdbId:cleanText(m.externalId?.imdb),title:cleanText(m.name),originalTitle:cleanText(m.alternativeName),year:num(m.year),type:cleanText(m.type),isSeries:typeof m.isSeries==="boolean"?m.isSeries:null,posterUrl:url(m.poster?.url),synopsis:cleanText(m.description),genres:names(m.genres),countries:names(m.countries),kinopoiskRating:rating(m.rating?.kp),imdbRating:rating(m.rating?.imdb),durationMinutes:num(m.movieLength),actors:Array.isArray(m.persons)?m.persons.filter((x:any)=>x?.enProfession==="actor").slice(0,20).map((x:any)=>cleanText(x.name)??cleanText(x.enName)).filter(Boolean):[]});
 Deno.serve(async(req)=>{
  const o=req.headers.get("origin")??"";
@@ -41,7 +56,7 @@ Deno.serve(async(req)=>{
   };
   // One counted request for connectivity test; never return the token.
   if(b.action==="health"){const m=await provider("movie/447301");return out(200,{ok:true,provider:"poiskkino",sampleId:m.id??null});}
-  if(!["search","select"].includes(b.action))return out(400,{error:"invalid_action"});
+  if(!["search","select","refresh"].includes(b.action))return out(400,{error:"invalid_action"});
   if(typeof b.entryId!=="string"||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(b.entryId))return out(400,{error:"invalid_entry"});
   const id=b.entryId;
   const rows=await db("kinoteka_entries?id=eq."+id+"&select=id,title,version");
@@ -55,6 +70,13 @@ Deno.serve(async(req)=>{
    if(!current||current.version!==entry.version)throw new Error("version_conflict");
    await db("kinoteka_metadata?on_conflict=entry_id",{method:"POST",headers:{Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify({entry_id:id,status,metadata,provider_id:providerId,fetched_at:status==="ready"?new Date().toISOString():null,last_error:null,updated_at:new Date().toISOString()})});
   };
+  if(b.action==="refresh"){
+   if(!Number.isSafeInteger(b.providerId)||b.providerId<=0)return out(400,{error:"invalid_provider_id"});
+   const detail=await provider("movie/"+b.providerId);
+   if(detail.id!==b.providerId||(year!==null&&detail.year!==year)||detail.isSeries!==series||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+   const metadata={...fields(detail),watchUrl:await findWatchUrl(detail.id,detail.name),fingerprint,fetchedAt:new Date().toISOString()};
+   await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
+  }
   if(b.action==="search"){
    if(cache?.status==="ready"&&cache.metadata?.fingerprint===fingerprint&&Date.now()-Date.parse(cache.fetched_at)<30*86400000)return out(200,{status:"ready",cached:true,metadata:cache.metadata});
    if(cache?.status==="needs_review"&&cache.metadata?.fingerprint===fingerprint&&Array.isArray(cache.metadata?.candidates)&&Date.now()-Date.parse(cache.updated_at)<86400000)return out(200,{status:"needs_review",cached:true,candidates:cache.metadata.candidates});
@@ -65,13 +87,13 @@ Deno.serve(async(req)=>{
    if(exact.length===1){
     const detail=await provider("movie/"+exact[0].id);
     if(detail.id!==exact[0].id||(year!==null&&detail.year!==year)||detail.isSeries!==series||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
-    const metadata={...fields(detail),fingerprint};await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
+    const metadata={...fields(detail),watchUrl:await findWatchUrl(detail.id,detail.name),fingerprint,fetchedAt:new Date().toISOString()};await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
    }
    await save("needs_review",{fingerprint,candidates},null);return out(200,{status:"needs_review",candidates});
   }
   if(!Number.isSafeInteger(b.providerId)||b.providerId<=0)return out(400,{error:"invalid_provider_id"});
   if(cache?.status!=="needs_review"||cache.metadata?.fingerprint!==fingerprint||!cache.metadata?.candidates?.some((x:any)=>x.kinopoiskId===b.providerId))return out(409,{error:"select_from_current_candidates"});
-  const m=await provider("movie/"+b.providerId);if(m.id!==b.providerId)throw new Error("provider_identity_mismatch");
-  const metadata={...fields(m),fingerprint};await save("ready",metadata,m.id);return out(200,{status:"ready",metadata});
+  const m=await provider("movie/"+b.providerId);if(m.id!==b.providerId||(year!==null&&m.year!==year)||m.isSeries!==series||![m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+  const metadata={...fields(m),watchUrl:await findWatchUrl(m.id,m.name),fingerprint,fetchedAt:new Date().toISOString()};await save("ready",metadata,m.id);return out(200,{status:"ready",metadata});
  }catch(e){const code=e instanceof Error?e.message:"unexpected";const safe=/^(budget_exhausted|provider_\d{3}|provider_schema|provider_identity_mismatch|version_conflict|database_\d{3})$/.test(code)?code:"request_failed";return out(safe==="budget_exhausted"?429:safe==="version_conflict"?409:502,{error:safe});}
 });
