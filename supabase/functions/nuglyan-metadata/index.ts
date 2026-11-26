@@ -8,11 +8,18 @@ const url=(v:unknown)=>{try{const u=new URL(String(v));return u.protocol==="http
 const names=(v:unknown)=>Array.isArray(v)?v.flatMap(x=>typeof x?.name==="string"?[x.name]:[]):[];
 const matchesKind=(m:any,expected:boolean|null,allowUnknown=false)=>{
  if(expected===null)return true;
- if(typeof m?.isSeries==="boolean")return m.isSeries===expected;
  const type=String(m?.type||"").toLowerCase();
  if(["tv-series","animated-series"].includes(type))return expected===true;
  if(["movie","cartoon"].includes(type))return expected===false;
+ if(typeof m?.isSeries==="boolean")return m.isSeries===expected;
  return allowUnknown;
+};
+const identityIssue=(m:any,id:number,year:number|null,series:boolean|null,title:string)=>{
+ if(m?.id!==id)return "provider_id_mismatch";
+ if(year!==null&&m?.year!==year)return "provider_year_mismatch";
+ if(!matchesKind(m,series,true))return "provider_kind_mismatch";
+ if(![m?.name,m?.alternativeName,m?.enName].some(n=>normalize(n)===normalize(title)))return "provider_title_mismatch";
+ return null;
 };
 
 const watchOrigin="https://g1b-13ngdzu.troutcdn.site";
@@ -46,7 +53,9 @@ Deno.serve(async(req)=>{
  const db=async(path:string,init:RequestInit={})=>{
   const r=await fetch(base+"/rest/v1/"+path,{...init,headers:{apikey:key,Authorization:auth,"Content-Type":"application/json",...(init.headers as Record<string,string>??{})},signal:AbortSignal.timeout(12000)});
   if(!r.ok)throw new Error("database_"+r.status);
-  return r.status===204?null:await r.json();
+  const raw=await r.text();
+  if(!raw.trim())return null;
+  try{return JSON.parse(raw);}catch{throw new Error("database_invalid_json");}
  };
  try{
   let admin;try{admin=await db("rpc/kinoteka_is_admin",{method:"POST",body:"{}"});}catch{return out(401,{error:"auth_failed"});}
@@ -57,11 +66,28 @@ Deno.serve(async(req)=>{
   const token=Deno.env.get("POISKKINO_API_KEY");
   if(!token)return out(503,{error:"provider_secret_missing"});
   const provider=async(path:string)=>{
-   const reserved=await db("rpc/kinoteka_reserve_metadata_request",{method:"POST",body:"{}"});
-   if(reserved!==true)throw new Error("budget_exhausted");
-   const r=await fetch("https://eu-api.poiskkino.dev/v1.5/"+path,{headers:{"X-API-KEY":token,"Accept":"application/json"},signal:AbortSignal.timeout(15000),redirect:"error"});
-   if(!r.ok)throw new Error("provider_"+r.status);
-   return await r.json();
+   let last="provider_empty_response";
+   for(let attempt=0;attempt<3;attempt++){
+    const reserved=await db("rpc/kinoteka_reserve_metadata_request",{method:"POST",body:"{}"});
+    if(reserved!==true)throw new Error("budget_exhausted");
+    try{
+     const r=await fetch("https://eu-api.poiskkino.dev/v1.5/"+path,{headers:{"X-API-KEY":token,"Accept":"application/json"},signal:AbortSignal.timeout(15000),redirect:"error"});
+     if(!r.ok){
+      const code="provider_"+r.status;
+      if((r.status===429||r.status>=500)&&attempt<2){last=code;await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));continue;}
+      throw new Error(code);
+     }
+     const raw=await r.text();
+     if(!raw.trim())throw new Error("provider_empty_response");
+     try{return JSON.parse(raw);}catch{throw new Error("provider_invalid_json");}
+    }catch(e){
+     const code=e instanceof Error?e.message:"provider_network";
+     const retryable=code==="provider_empty_response"||code==="provider_invalid_json"||code==="provider_network"||code==="TimeoutError"||code==="TypeError"||code==="provider_429"||/^provider_5\\d\\d$/.test(code);
+     if(!retryable||attempt>=2)throw e;
+     last=code;await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));
+    }
+   }
+   throw new Error(last);
   };
   // One counted request for connectivity test; never return the token.
   if(b.action==="health"){const m=await provider("movie/447301");return out(200,{ok:true,provider:"poiskkino",sampleId:m.id??null});}
@@ -81,10 +107,25 @@ Deno.serve(async(req)=>{
   };
   if(b.action==="refresh"){
    if(!Number.isSafeInteger(b.providerId)||b.providerId<=0)return out(400,{error:"invalid_provider_id"});
-   const detail=await provider("movie/"+b.providerId);
-   if(detail.id!==b.providerId||(year!==null&&detail.year!==year)||!matchesKind(detail,series,true)||![detail.name,detail.alternativeName,detail.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
+   let detail=await provider("movie/"+b.providerId);
+   const issue=identityIssue(detail,b.providerId,year,series,entry.title);
+   if(issue){
+    if(issue==="provider_id_mismatch")throw new Error(issue);
+    const data=await provider("movie/search?limit=10&query="+encodeURIComponent(entry.title.slice(0,200)));
+    if(!Array.isArray(data.docs))throw new Error("provider_schema");
+    const exact=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0&&[m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title))&&matchesKind(m,series,false)&&(year===null||m.year===year));
+    if(exact.length!==1){
+     const candidates=data.docs.filter((m:any)=>Number.isSafeInteger(m.id)&&m.id>0).map(fields);
+     await save("needs_review",{fingerprint,candidates,reason:issue,checkedAt:new Date().toISOString()},null);
+     return out(200,{status:"needs_review",reason:issue,candidates});
+    }
+    const candidate=exact[0];
+    detail=await provider("movie/"+candidate.id);
+    const replacementIssue=identityIssue(detail,candidate.id,year,series,entry.title);
+    if(replacementIssue)throw new Error(replacementIssue);
+   }
    const metadata={...fields(detail),watchUrl:await findWatchUrl(detail.id,detail.name),fingerprint,fetchedAt:new Date().toISOString()};
-   await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata});
+   await save("ready",metadata,detail.id);return out(200,{status:"ready",metadata,relinked:detail.id!==b.providerId});
   }
   if(b.action==="search"){
    if(cache?.status==="ready"&&cache.metadata?.fingerprint===fingerprint&&Date.now()-Date.parse(cache.fetched_at)<30*86400000)return out(200,{status:"ready",cached:true,metadata:cache.metadata});
