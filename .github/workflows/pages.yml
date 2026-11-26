@@ -54,7 +54,7 @@ jobs:
       - name: Prepare site
         run: |
           mkdir -p _site
-          cp frontend/index.html frontend/style.css frontend/draft-queue.js frontend/session-store.js frontend/app.js frontend/server.js _site/
+          cp frontend/index.html frontend/style.css frontend/draft-queue.js frontend/session-store.js frontend/app.js frontend/server.js frontend/favicon-nuglyan.png _site/
       - uses: actions/upload-pages-artifact@v4
         with:
           path: _site
