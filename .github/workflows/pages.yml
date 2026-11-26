@@ -1,9 +1,16 @@
-name: Deploy nuglyan preview
+name: Validate and deploy Nuglyan
 on:
   push:
     branches: [main]
     paths:
       - 'frontend/**'
+      - 'tests/**'
+      - 'supabase/functions/**'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'tests/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 permissions:
@@ -11,10 +18,30 @@ permissions:
   pages: write
   id-token: write
 concurrency:
-  group: github-pages
+  group: nuglyan-pages
   cancel-in-progress: false
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Validate JavaScript
+        run: |
+          node --check frontend/draft-queue.js
+          node --check frontend/session-store.js
+          node --check frontend/app.js
+          node --check frontend/server.js
+      - name: Run data-safety regression tests
+        run: node --test tests/*.test.js
+      - name: Validate static site
+        run: |
+          test -s frontend/index.html
+          test -s frontend/style.css
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -23,15 +50,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Validate frontend
-        run: |
-          node --check frontend/app.js
-          node --check frontend/server.js
-          test -s frontend/index.html
-          test -s frontend/style.css
-          mkdir -p _site
-          cp frontend/index.html frontend/style.css frontend/app.js frontend/server.js _site/
       - uses: actions/configure-pages@v5
+      - name: Prepare site
+        run: |
+          mkdir -p _site
+          cp frontend/index.html frontend/style.css frontend/draft-queue.js frontend/session-store.js frontend/app.js frontend/server.js _site/
       - uses: actions/upload-pages-artifact@v4
         with:
           path: _site
