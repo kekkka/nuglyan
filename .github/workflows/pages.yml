@@ -5,6 +5,7 @@ on:
     paths:
       - 'frontend/**'
       - 'tests/**'
+      - 'supabase/functions/**'
       - '.github/workflows/pages.yml'
   pull_request:
     paths:
