@@ -53,11 +53,13 @@ async function hydratePrivate(){
   if(!admin)throw Error('Нет доступа');
   const [rows,meta]=await Promise.all([readAll('/rest/v1/kinoteka_entries?select=id,source_key,original_json,version&order=created_at.desc,id',true),readAll('/rest/v1/kinoteka_metadata?select=entry_id,metadata,provider_id,status&order=entry_id',true)]);
   const published=new Set(publicRows.map(x=>x.id));
+  const metadataById=new Map(meta.map(m=>[m.entry_id,m]));
   privateIndex={};versions.clear();
   for(const m of meta){const k=sourceFor(m.provider_id,m.metadata?.legacy||{fields:m.metadata||{}});if(k)privateIndex[m.entry_id]=k;}
   privateRows=rows.filter(x=>uuid(x.id)).map(row=>{
-    const original=JSON.parse(row.original_json);versions.set(row.id,{version:row.version,source_key:row.source_key,legacyId:original.id});
-    return {...original,id:row.id,pub:published.has(row.id)};
+    const original=JSON.parse(row.original_json),metadata=metadataById.get(row.id);
+    versions.set(row.id,{version:row.version,source_key:row.source_key,legacyId:original.id});
+    return {...original,id:row.id,pub:published.has(row.id),ratingsStatus:metadata?.status||original.ratingsStatus||null};
   });
   const publishedById=new Map(publicRows.map(x=>[x.id,x]));
   for(const record of privateRows){
@@ -80,7 +82,7 @@ function snapshot(x){
   for(const [i,g] of groups.entries())for(let j=0;j<g.length-1;j++){const key=i+'_'+j;if(typeof x.answers?.[key]==='string')a.answers[key]=x.answers[key];}
   for(const [key] of criteria){const n=score(x[key]);if(n!==null)a[key]=n;}
   for(const key of ['year','director','writer','camera','music','duration','age'])if(typeof k?.fields?.[key]==='string')a.facts[key]=k.fields[key];
-  const card={title:str(x.name),type:x.kind==='Фильм'?'film':'series',year:x.year||null,genres:list(x.genre),countries:list(x.country),synopsis:str(x.desc),authorReview:str(x.review),authorNotes:str(x.note),authorRating:score(x.score),kinopoiskRating:score(x.kinopoiskRating),imdbRating:score(x.imdbRating),ratingsUpdatedAt:x.ratingsUpdatedAt||k?.fields?.fetchedAt||null,ratingsStatus:x.ratingsStatus||null,watchUrl:k?.fields?.watchUrl||x.watchUrl||null,tags:[str(x.atmos),str(x.topic)].filter(Boolean),characteristics:a,recommended:x.recommended===true};
+  const card={title:str(x.name),type:x.kind==='Фильм'?'film':'series',year:x.year||null,genres:list(x.genre),countries:list(x.country),synopsis:str(x.desc),authorReview:str(x.review),authorNotes:str(x.note),authorRating:score(x.score),kinopoiskRating:score(x.kinopoiskRating),imdbRating:score(x.imdbRating),ratingsUpdatedAt:x.ratingsUpdatedAt||k?.fields?.fetchedAt||null,watchUrl:k?.fields?.watchUrl||x.watchUrl||null,tags:[str(x.atmos),str(x.topic)].filter(Boolean),characteristics:a,recommended:x.recommended===true};
   if(k)card.kinopoiskId=k.id;
   return card;
 }
@@ -187,29 +189,31 @@ async function refreshPublishedRatings(force=false){
  if(ratingRefreshTask)return ratingRefreshTask;
  ratingRefreshTask=(async()=>{
   const cutoff=Date.now()-30*24*60*60*1000;
-  const jobs=publicRows.filter(x=>{
-   if(!force&&(x.ratingsStatus==='ready'||x.ratingsStatus==='needs_review'))return false;
-   const fetched=Date.parse(x.ratingsUpdatedAt||'');
-   const hasAnyRating=x.kinopoiskRating!=null||x.imdbRating!=null;
+  const privateById=new Map(privateRows.map(x=>[x.id,x]));
+  const jobs=publicRows.filter(pub=>{
+   const metadataStatus=privateById.get(pub.id)?.ratingsStatus;
+   if(!force&&(metadataStatus==='ready'||metadataStatus==='needs_review'))return false;
+   const fetched=Date.parse(pub.ratingsUpdatedAt||'');
+   const hasAnyRating=pub.kinopoiskRating!=null||pub.imdbRating!=null;
    const stale=Number.isFinite(fetched)&&fetched<cutoff;
-   // Existing scores without a timestamp are kept; do not re-fetch all 59 already populated cards.
+   // Existing scores without a timestamp are kept; do not re-fetch populated cards.
    return force||(!hasAnyRating)||stale;
   });
   let updated=0,failed=0,skipped=0,needsReview=0;
   const status=()=>document.getElementById('ratingsSyncStatus');
   const report=message=>{if(status())status().textContent=message;};
-  if(!jobs.length){report(publicRows.length?'Внешние оценки уже актуальны.':'В медиатеке пока нет опубликованных произведений.');return {updated,failed,skipped,needsReview};}
+  if(!jobs.length){const pendingReview=privateRows.filter(x=>x.ratingsStatus==='needs_review').length;report(publicRows.length?'Внешние оценки актуальны. На ручной проверке: '+pendingReview+'.':'В медиатеке пока нет опубликованных произведений.');return {updated,failed,skipped,needsReview:pendingReview};}
   report('Обновляем оценки: 0 из '+jobs.length+'…');
   for(let i=0;i<jobs.length;i++){
-   const pub=jobs[i],record=privateRows.find(x=>x.id===pub.id);
+   const pub=jobs[i],record=privateById.get(pub.id);
    if(!record){skipped++;report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed+' · пропущено '+skipped);continue;}
    try{
     if(!record.kinopoiskId&&pub.kinopoiskId)record.kinopoiskId=pub.kinopoiskId;
     const result=await resolveMetadata(record,{providerId:pub.kinopoiskId,persist:false});
     if(result?.status==='needs_review'){
+     // Candidate list and review state are already persisted in kinoteka_metadata.
+     // Do not republish a public card just to store an internal review flag.
      record.ratingsStatus='needs_review';
-     const version=await rpc('nuglyan_commit_card',{p_id:record.id,p_version:versions.get(record.id).version,p_title:str(record.draft?.name||record.name).trim(),p_original_json:JSON.stringify(cleanRecord(record)),p_action:'publish',p_card:snapshot(record)},true);
-     versions.get(record.id).version=version;
      needsReview++;
     }else{
      if(result?.status!=='ready')throw Error('metadata_not_ready');
