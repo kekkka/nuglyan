@@ -1,5 +1,5 @@
 // nuglyan: admin-only metadata adapter. No external dependencies.
-const origin = new Set(["https://kinoteka-veroniki.waxencream256.chatgpt.site","https://kekkka.github.io"]);
+const origin = new Set(["https://kinoteka-veroniki.waxencream256.chatgpt.site","https://kekkka.github.io","https://nuglyan.netlify.app"]);
 const normalize = (v: unknown) => typeof v === "string" ? v.normalize("NFKC").toLowerCase().replace(/ё/g,"е").replace(/[^\p{L}\p{N}]+/gu," ").trim() : "";
 const cleanText=(v:unknown)=>typeof v==="string"?v:null;
 const num=(v:unknown)=>typeof v==="number"&&Number.isFinite(v)?v:null;
