@@ -12,8 +12,20 @@ const groups=[
 const go=h=>location.hash=h,link=(h,t)=>'<a href="#'+h+'">'+t+'</a>', save=()=>{throw new Error('Use server persistence')},btn=(t,fn,cls='')=>'<button class="'+cls+'" onclick="'+fn+'">'+t+'</button>';
 let kpIndex={};
 function kp(x){return kpIndex[x.sourceKey||x.id]}
-function img(x){const source=kp(x);return source?'<img loading="lazy" referrerpolicy="no-referrer" src="https://st.kp.yandex.net/images/film_iphone/iphone360_'+source.id+'.jpg" alt="Постер · '+esc(x.name)+'" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><div class="fallback" hidden>'+esc(x.name.slice(0,2))+'</div>':'<div class="fallback">'+esc(x.name.slice(0,2))+'</div>'}
-function kpFacts(x){const k=kp(x);if(!k)return '';const labels={year:'Год производства',director:'Режиссёр',writer:'Сценарий',camera:'Оператор',music:'Композитор',duration:x.kind==='Сериал'?'Длительность серии':'Длительность',age:'Возраст'};return '<section class="panel"><h2>Справка Кинопоиска</h2><dl class="facts">'+Object.entries(labels).filter(([key])=>k.fields[key]).map(([key,label])=>'<dt>'+label+'</dt><dd>'+esc(k.fields[key])+'</dd>').join('')+'</dl><a class="source" href="'+esc(k.url)+'" target="_blank" rel="noopener noreferrer">Карточка на Кинопоиске ↗</a></section>'}
+function safeHttpsUrl(value){try{const u=new URL(String(value));return u.protocol==='https:'&&!u.username&&!u.password?u.href:null;}catch{return null;}}
+function watchLinks(x){
+ const list=Array.isArray(x.watchLinks)?x.watchLinks:[],seen=new Set(),out=[];
+ for(const item of list){const url=safeHttpsUrl(item?.url);if(!url||seen.has(url))continue;seen.add(url);out.push({url,name:String(item.name||new URL(url).hostname).slice(0,80)});if(out.length===8)break;}
+ return out;
+}
+function img(x){const source=kp(x),url=safeHttpsUrl(x.posterUrl||source?.fields?.posterUrl);return url?'<img loading="lazy" src="'+esc(url)+'" alt="Постер · '+esc(x.name)+'" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><div class="fallback" hidden>'+esc(x.name.slice(0,2))+'</div>':'<div class="fallback">'+esc(x.name.slice(0,2))+'</div>'}
+function kpFacts(x){
+ const k=kp(x);if(!k)return '';
+ const f=k.fields||{},labels={year:'Год производства',director:'Режиссёр',writer:'Сценарий',camera:'Оператор',music:'Композитор',duration:'Длительность',ageRating:'Возрастной рейтинг',premiere:'Премьера',networks:'Платформа / телеканал',actors:'В ролях'};
+ const rows=Object.entries(labels).map(([key,label])=>{const v=f[key];return v==null||v===''?'':'<dt>'+label+'</dt><dd>'+esc(Array.isArray(v)?v.join(', '):v)+'</dd>';}).join('');
+ const imdb=String(x.imdbId||f.imdbId||'');
+ return '<section class="panel"><h2>Справка Кинопоиска</h2>'+(rows?'<dl class="facts">'+rows+'</dl>':'<p class="muted">Дополнительные сведения пока не загружены.</p>')+'<a class="source" href="'+esc(k.url)+'" target="_blank" rel="noopener noreferrer">Карточка на Кинопоиске ↗</a>'+(/^tt\\d{5,12}$/i.test(imdb)?' <a class="source" href="https://www.imdb.com/title/'+esc(imdb)+'/" target="_blank" rel="noopener noreferrer">Карточка на IMDb ↗</a>':'')+'</section>';
+}
 function search(v){q=v.trim();render()}
 function words(x){return [x.name,x.genre,x.country,x.atmos,x.topic,x.note,x.desc,x.review,...Object.values(x.answers||{})].filter(Boolean).join(' ').toLowerCase().replaceAll('ё','е')}
 function rank(x){if(!q)return 1;let s=words(x),v=q.toLowerCase().replaceAll('ё','е');if(v.includes('без мистики')&&!x.noMystic)return 0;if(s.includes(v))return 50;let terms=v.match(/[а-яa-z]{3,}/g)||[];return terms.filter(t=>!['хочу','чтобы','сериал','посмотреть','фильм','без','мистики'].includes(t)).reduce((a,t)=>a+(s.includes(t.slice(0,t.length>5?-2:undefined))?1:0),0)||(+v.includes('без мистики')&&x.noMystic?1:0)}
@@ -24,15 +36,11 @@ function field(t,k,v,area=false){return '<label>'+esc(t)+(area?'<textarea name="
 function edit(x){let d=x.draft||x;app.innerHTML=link('library','‹ Моя медиатека')+'<h1>'+esc(x.name||'Новое произведение')+'</h1><section class="panel" id="editor">'+field('Название','name',d.name)+'<label>Формат <select name="kind"><option>Сериал</option><option '+(d.kind==='Фильм'?'selected':'')+'>Фильм</option></select></label>'+'<details class="reference"><summary>Справка о произведении</summary><p class="sourceStatus" role="status"></p>'+ field('Год','year',d.year)+field('Страна','country',d.country)+field('Жанр','genre',d.genre)+field('Атмосфера','atmos',d.atmos)+field('Темы','topic',d.topic)+field('Сюжет без спойлеров','desc',d.desc,true)+'</details>'+field('Заметки для себя','privateNote',d.privateNote,true)+field('Публичная рецензия','review',d.review,true)+ratingBlock(d,true)+criteria.map(([key,title])=>'<label>'+title+' <input type="number" min="1" max="10" name="'+key+'" value="'+esc(d[key])+'"></label>').join('')+'<h2>Полный разбор</h2>'+renderChapters(d)+'<label><input style="width:auto" name="noMystic" type="checkbox" '+(d.noMystic?'checked':'')+'> Подтверждаю отсутствие мистики</label><div class="row">'+btn('Сохранить черновик','commit(false)')+btn('Опубликовать в каталоге','commit(true)','primary')+(x.pub?btn('Снять с публикации','unpublish()'):'')+'</div><p id="feedback" role="status"></p></section>';window.current=x;bindEditor(x);loadExtras(x,true)}
 function commit(pub){let x=window.current,d={...x,...x.draft,answers:{...(x.draft||x).answers}};delete d.draft;document.querySelectorAll('#editor [name]').forEach(el=>{let k=el.name;if(k.startsWith('state-'))return;if(/^a[0-9]+_/.test(k))d.answers[k.slice(1)]=el.value;else d[k]=el.type==='checkbox'?el.checked:el.value});if(!d.name||document.querySelector('#editor input:invalid')){feedback.textContent='Проверь название и оценку от 1 до 10';return}if(!db.includes(x))db.unshift(x);if(pub){Object.assign(x,d,{pub:true});delete x.draft}else{x.draft=d;if(!x.name)x.name=d.name}save();if(pub)go('title/'+x.id);else{history.replaceState(null,'','#edit/'+x.id);feedback.textContent='Черновик сохранён в этом браузере'}}
 function unpublish(){current.pub=false;save();go('library')}
-function watchUrl(x){
- const id=String(x.kinopoiskId||kp(x)?.id||'').trim();
- if(!/^\d{1,12}$/.test(id))return null;
- return 'https://g1b-13ngdzu.troutcdn.site/'+id;
-}
 function watchAction(x){
- const url=watchUrl(x);
- if(!url)return '<div class="watch-action"><small class="muted">Ссылка на просмотр появится после привязки карточки Кинопоиска.</small></div>';
- return '<div class="watch-action"><a class="watch-button" href="'+esc(url)+'" target="_blank" rel="noopener noreferrer">Смотреть ↗</a><small class="muted">Основной сайт просмотра · откроется в новой вкладке.</small></div>';
+ const links=watchLinks(x);
+ if(links.length)return '<div class="watch-action"><strong>Где посмотреть</strong><div class="watch-links">'+links.map(v=>'<a class="watch-button" href="'+esc(v.url)+'" target="_blank" rel="noopener noreferrer">'+esc(v.name)+' ↗</a>').join('')+'</div><small class="muted">Доступность платформ может меняться.</small></div>';
+ const source=kp(x);
+ return source?'<div class="watch-action"><a class="watch-button" href="'+esc(source.url)+'" target="_blank" rel="noopener noreferrer">Открыть Кинопоиск ↗</a></div>':'<div class="watch-action"><small class="muted">Ссылки на просмотр пока не найдены.</small></div>';
 }
 function detail(x){app.innerHTML=link('','‹ В каталог')+'<section class="panel detail">'+('<div class="detailPoster">'+img(x)+'</div>')+'<div><span class="eyebrow">'+esc(x.kind)+'</span><h1>'+esc(x.name)+'</h1><p>'+esc([x.year,x.country,x.genre].filter(Boolean).join(' · '))+'</p>'+watchAction(x)+'</div></section>'+ratingBlock(x,false)+'<div class="row">'+[x.atmos,x.topic,...criteria.filter(([k])=>x[k]).map(([k,t])=>t+' '+x[k]+'/10')].filter(Boolean).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</div><section class="panel"><h2>О произведении</h2><p>'+esc(x.desc||'Описание пока не добавлено.')+'</p></section>'+kpFacts(x)+'<section class="panel"><h2>Авторский разбор</h2>'+reviewList(x)+groups.map(([g,...qs],i)=>{let a=qs.map((t,j)=>x.answers?.[i+'_'+j]?'<p><b>'+esc(t)+'</b><br>'+esc(x.answers[i+'_'+j])+'</p>':'').join('');return a?'<details><summary>'+g+'</summary>'+a+'</details>':''}).join('')+'</section>';loadExtras(x,false)}
 
@@ -151,41 +159,20 @@ function startCard() {
 }
 
 function ratingBlock(record, editing) {
-  const mine = editing ? '<input aria-label="Моя оценка" name="score" type="number" min="1" max="10" placeholder="—" value="'+esc(record.score)+'">' : '<strong>'+esc(record.score||'—')+'</strong>';
-  return '<section class="scoreboard"><div class="mine"><small>Оценка Вероники</small><div>'+mine+'<span> / 10</span></div></div><div class="externalScores"><div>Кинопоиск <b data-rating="kp">—</b></div><div>IMDb <b data-rating="imdb">—</b></div><small class="ratingDate"></small></div></section>';
+ const mine=editing?'<input aria-label="Моя оценка" name="score" type="number" min="1" max="10" placeholder="—" value="'+esc(record.score)+'">':'<strong>'+esc(record.score||'—')+'</strong>';
+ const rating=v=>v==null||v===''?'—':Number.isFinite(Number(v))&&Number(v)>=1&&Number(v)<=10?Number(v).toFixed(1):'—';
+ const date=record.ratingsUpdatedAt&&Number.isFinite(Date.parse(record.ratingsUpdatedAt))?new Intl.DateTimeFormat('ru-RU').format(new Date(record.ratingsUpdatedAt)):'';
+ return '<section class="scoreboard"><div class="mine"><small>Оценка Вероники</small><div>'+mine+'<span> / 10</span></div></div><div class="externalScores"><div>Кинопоиск <b data-rating="kp">'+rating(record.kinopoiskRating)+'</b></div><div>IMDb <b data-rating="imdb">'+rating(record.imdbRating)+'</b></div><small class="ratingDate">'+(date?'Данные обновлены · '+date:'')+'</small></div></section>';
 }
-
-const extraCache = new Map();
-async function loadExtras(record, editing) {
-  const board = app.querySelector('.scoreboard');
-  const status = app.querySelector('.sourceStatus');
-  const key = record.sourceKey || record.id;
-  if (!kp(record)) {
-    if (status) status.textContent='Источника пока нет. Поля можно заполнить вручную.';
-    return;
-  }
-  if (status) status.textContent='Загружаем справку…';
-  try {
-    if (!extraCache.has(key)) extraCache.set(key, fetch('facts/'+encodeURIComponent(key)+'.json').then(r=>{
-      if (!r.ok) throw Error();
-      return r.json();
-    }));
-    const source = await extraCache.get(key);
-    if (!board.isConnected) return;
-    for (const type of ['kp','imdb']) board.querySelector('[data-rating="'+type+'"]').textContent=source.ratings[type]||'—';
-    if (Object.values(source.ratings).some(Boolean)) board.querySelector('.ratingDate').textContent='По данным Кинопоиска · 26.11.2026';
-    if (!editing) return;
-    const draft = record.draft || record;
-    const values = {...source.editor, year:source.fields.year?.match(/\d{4}/)?.[0]||source.editor.year};
-    for (const [name,value] of Object.entries(values)) {
-      const field = document.querySelector('#editor [name="'+name+'"]');
-      if (field && value && !draft.manualFields?.[name] && !record.draft?.manualFields?.[name] && (!field.value || (!record.draft && name==='year'))) field.value=value;
-    }
-    status.textContent='Справка загружена. Атмосфера, темы и краткий сюжет взяты из коллекции, если заполнены.';
-  } catch {
-    extraCache.delete(key);
-    if (status) status.textContent='Справка временно недоступна. Можно продолжить разбор.';
-  }
+function loadExtras(record,editing){
+ const board=app.querySelector('.scoreboard'),status=app.querySelector('.sourceStatus');
+ if(board){board.querySelector('[data-rating="kp"]').textContent=record.kinopoiskRating==null?'—':Number(record.kinopoiskRating).toFixed(1);board.querySelector('[data-rating="imdb"]').textContent=record.imdbRating==null?'—':Number(record.imdbRating).toFixed(1);}
+ const source=kp(record);if(!source){if(status)status.textContent='Источника пока нет. Поля можно заполнить вручную.';return;}
+ if(!editing)return;
+ const fields=source.fields||{},draft=record.draft||record;
+ const values={year:fields.year==null?'':String(fields.year),country:Array.isArray(fields.countries)?fields.countries.join(', '):'',genre:Array.isArray(fields.genres)?fields.genres.join(', '):'',desc:fields.synopsis||''};
+ for(const [name,value] of Object.entries(values)){const el=document.querySelector('#editor [name="'+name+'"]');if(el&&value&&!draft.manualFields?.[name]&&!el.value)el.value=value;}
+ if(status)status.textContent='Справка загружена из сохранённых данных. Дополнительный запрос к API не выполняется.';
 }
 
 function reviewList(record) {

@@ -28,17 +28,13 @@ async function refreshSession(){
   return refreshTask;
 }
 function publicRecord(row){
-  const c=row.card||{},a=c.characteristics||{};
-  const kpId=String(c.kinopoiskId||'').trim();
-  const watchUrl=/^\d{1,12}$/.test(kpId)?'https://g1b-13ngdzu.troutcdn.site/'+kpId:null;
-  return {id:row.entry_id,pub:true,name:str(c.title),kind:c.type==='film'||c.type==='Фильм'?'Фильм':'Сериал',year:c.year,genre:list(c.genres).join(', '),country:list(c.countries).join(', '),desc:str(c.synopsis),note:str(c.authorNotes),review:str(c.authorReview),score:c.authorRating,atmos:str(a.atmos),topic:str(a.topic),answers:a.answers||{},noMystic:a.noMystic===true,...Object.fromEntries(criteria.map(([k])=>[k,a[k]])),kinopoiskId:c.kinopoiskId,watchUrl,kinopoiskRating:c.kinopoiskRating,imdbRating:c.imdbRating,ratingsUpdatedAt:c.ratingsUpdatedAt,ratingsStatus:c.ratingsStatus||null,recommended:c.recommended===true,legacyFacts:a.facts||{}};
+ const c=row.card||{},a=c.characteristics||{};
+ return {id:row.entry_id,pub:true,name:str(c.title),kind:c.type==='film'||c.type==='Фильм'?'Фильм':'Сериал',year:c.year,genre:list(c.genres).join(', '),country:list(c.countries).join(', '),desc:str(c.synopsis),note:str(c.authorNotes),review:str(c.authorReview),score:c.authorRating,atmos:str(a.atmos),topic:str(a.topic),answers:a.answers||{},noMystic:a.noMystic===true,...Object.fromEntries(criteria.map(([k])=>[k,a[k]])),kinopoiskId:c.kinopoiskId,posterUrl:c.posterUrl||null,imdbId:c.imdbId||null,watchLinks:Array.isArray(c.watchLinks)?c.watchLinks:[],kinopoiskRating:c.kinopoiskRating,imdbRating:c.imdbRating,ratingsUpdatedAt:c.ratingsUpdatedAt,ratingsStatus:c.ratingsStatus||null,recommended:c.recommended===true,legacyFacts:a.facts||{}};
 }
-
 function sourceFor(id,legacy){
-  const k=String(id||legacy?.id||'');
-  if(!/^\d+$/.test(k))return null;
-  const url=legacy?.url;
-  return {id:k,url:typeof url==='string'&&/^https:\/\/www\.kinopoisk\.ru\/(?:film|series)\/\d+\/?$/.test(url)?url:'https://www.kinopoisk.ru/film/'+k+'/',fields:legacy?.fields||{}};
+ const k=String(id||legacy?.id||'');if(!/^\\d+$/.test(k))return null;
+ const fields=legacy?.fields||{},series=fields.isSeries===true||['tv-series','animated-series'].includes(String(fields.type||'').toLowerCase());
+ return {id:k,url:'https://www.kinopoisk.ru/'+(series?'series':'film')+'/'+k+'/',fields};
 }
 async function readAll(path,auth=false){
   let out=[];
@@ -52,7 +48,7 @@ async function loadPublic(){
   const rows=await readAll('/rest/v1/kinoteka_publications?select=entry_id,card&order=entry_id');
   publicRows=rows.filter(x=>uuid(x.entry_id)).map(publicRecord);
   publicIndex={};
-  for(const x of publicRows){const k=sourceFor(x.kinopoiskId,{fields:{...x.legacyFacts,watchUrl:x.watchUrl}});if(k)publicIndex[x.id]=k;}
+  for(const x of publicRows){const k=sourceFor(x.kinopoiskId,{fields:{...x.legacyFacts,posterUrl:x.posterUrl,imdbId:x.imdbId,watchLinks:x.watchLinks}});if(k)publicIndex[x.id]=k;}
 }
 async function hydratePrivate(){
   if(!admin)throw Error('Нет доступа');
@@ -74,7 +70,8 @@ async function hydratePrivate(){
     if(record.kinopoiskRating==null&&pub.kinopoiskRating!=null)record.kinopoiskRating=pub.kinopoiskRating;
     if(record.imdbRating==null&&pub.imdbRating!=null)record.imdbRating=pub.imdbRating;
     if((!Array.isArray(record.watchLinks)||!record.watchLinks.length)&&pub.watchLinks?.length)record.watchLinks=pub.watchLinks;
-    if(!record.watchUrl&&pub.watchUrl)record.watchUrl=pub.watchUrl;
+    if(!record.posterUrl&&pub.posterUrl)record.posterUrl=pub.posterUrl;
+    if(!record.imdbId&&pub.imdbId)record.imdbId=pub.imdbId;
     if(!record.ratingsUpdatedAt&&pub.ratingsUpdatedAt)record.ratingsUpdatedAt=pub.ratingsUpdatedAt;
     if(!privateIndex[record.id]&&pub.kinopoiskId)privateIndex[record.id]=sourceFor(pub.kinopoiskId,{fields:{...pub.legacyFacts,watchUrl:pub.watchUrl}});
   }
@@ -102,18 +99,16 @@ function cleanRecord(record){
   return d;
 }
 function snapshot(x){
-  const k=privateIndex[x.id],a={atmos:str(x.atmos),topic:str(x.topic),noMystic:x.noMystic===true,answers:{},facts:{}};
-  const watchId=String(k?.id||x.kinopoiskId||'').trim();
-  const primaryWatchUrl=/^\d{1,12}$/.test(watchId)?'https://g1b-13ngdzu.troutcdn.site/'+watchId:null;
-  for(const [i,g] of groups.entries())for(let j=0;j<g.length-1;j++){const key=i+'_'+j;if(typeof x.answers?.[key]==='string')a.answers[key]=x.answers[key];}
-  for(const [key] of criteria){const n=score(x[key]);if(n!==null)a[key]=n;}
-  for(const key of ['year','director','writer','camera','music','duration','age'])if(typeof k?.fields?.[key]==='string')a.facts[key]=k.fields[key];
-  const card={title:str(x.name),type:x.kind==='Фильм'?'film':'series',year:x.year||null,genres:list(x.genre),countries:list(x.country),synopsis:str(x.desc),authorReview:str(x.review),authorNotes:str(x.note),authorRating:score(x.score),kinopoiskRating:score(x.kinopoiskRating),imdbRating:score(x.imdbRating),ratingsUpdatedAt:x.ratingsUpdatedAt||k?.fields?.fetchedAt||null,watchUrl:primaryWatchUrl,tags:[str(x.atmos),str(x.topic)].filter(Boolean),characteristics:a,recommended:x.recommended===true};
-  if(k)card.kinopoiskId=k.id;
-  else if(watchId)card.kinopoiskId=watchId;
-  return card;
+ const k=privateIndex[x.id],f=k?.fields||{},a={atmos:str(x.atmos),topic:str(x.topic),noMystic:x.noMystic===true,answers:{},facts:{...(x.legacyFacts||{})}};
+ for(const [i,g] of groups.entries())for(let j=0;j<g.length-1;j++){const key=i+'_'+j;if(typeof x.answers?.[key]==='string')a.answers[key]=x.answers[key];}
+ for(const [key] of criteria){const n=score(x[key]);if(n!==null)a[key]=n;}
+ for(const key of ['year','director','writer','camera','music','duration','ageRating','premiere','networks','actors'])if(f[key]!=null&&f[key]!=='')a.facts[key]=f[key];
+ const watchLinks=Array.isArray(f.watchLinks)?f.watchLinks:Array.isArray(x.watchLinks)?x.watchLinks:[];
+ const imdbId=typeof (f.imdbId||x.imdbId)==='string'&&/^tt\\d{5,12}$/i.test(f.imdbId||x.imdbId)?(f.imdbId||x.imdbId):null;
+ const card={title:str(x.name),type:x.kind==='Фильм'?'film':'series',year:x.year||f.year||null,genres:list(x.genre).length?list(x.genre):list(f.genres),countries:list(x.country).length?list(x.country):list(f.countries),synopsis:str(x.desc)||str(f.synopsis),authorReview:str(x.review),authorNotes:str(x.note),authorRating:score(x.score),kinopoiskRating:score(x.kinopoiskRating),imdbRating:score(x.imdbRating),ratingsUpdatedAt:x.ratingsUpdatedAt||f.fetchedAt||null,posterUrl:f.posterUrl||x.posterUrl||null,imdbId,watchLinks,watchUrl:watchLinks[0]?.url||null,tags:[str(x.atmos),str(x.topic)].filter(Boolean),characteristics:a,recommended:x.recommended===true};
+ if(k)card.kinopoiskId=k.id;else if(x.kinopoiskId)card.kinopoiskId=String(x.kinopoiskId);
+ return card;
 }
-
 async function writeRecord(record){
   if(!admin)throw Error('Нет доступа');
   const v=versions.get(record.id);
@@ -195,7 +190,7 @@ function ratingReviewMarkup(){
 }
 library=function(){
  originalLibrary();
- app.insertAdjacentHTML('afterbegin','<div class="row admin-tools"><button onclick="downloadBackup()">Экспорт JSON</button><button onclick="refreshPublishedRatings()">Обновить оценки Кинопоиска и IMDb</button><button onclick="signout()">Выйти</button><p id="ratingsSyncStatus" class="rating-sync-status" role="status"></p></div>');
+ app.insertAdjacentHTML('afterbegin','<div class="row admin-tools"><button onclick="downloadBackup()">Экспорт JSON</button><button onclick="refreshPublishedRatings(true)">Обновить данные · до 10 карточек</button><button onclick="signout()">Выйти</button><p id="ratingsSyncStatus" class="rating-sync-status" role="status"></p></div>');
  app.insertAdjacentHTML('beforeend',ratingReviewMarkup());
 };
 edit=function(x){originalEdit(x);app.querySelector('#editor').insertAdjacentHTML('beforeend','<button onclick="downloadBackup()">Скачать резервную копию</button>');};
@@ -302,56 +297,32 @@ async function refreshPublishedRatings(force=false){
  if(!admin||!session){const el=document.getElementById('ratingsSyncStatus');if(el)el.textContent='Сначала войдите в личный кабинет администратора.';return {updated:0,failed:0};}
  if(ratingRefreshTask)return ratingRefreshTask;
  ratingRefreshTask=(async()=>{
-  const cutoff=Date.now()-30*24*60*60*1000;
-  const privateById=new Map(privateRows.map(x=>[x.id,x]));
-  const jobs=publicRows.filter(pub=>{
-   const metadataStatus=privateById.get(pub.id)?.ratingsStatus;
-   if(!force&&(metadataStatus==='ready'||metadataStatus==='needs_review'))return false;
-   const fetched=Date.parse(pub.ratingsUpdatedAt||'');
-   const hasAnyRating=pub.kinopoiskRating!=null||pub.imdbRating!=null;
-   const stale=Number.isFinite(fetched)&&fetched<cutoff;
-   // Existing scores without a timestamp are kept; do not re-fetch populated cards.
-   return force||(!hasAnyRating)||stale;
-  });
-  let updated=0,failed=0,skipped=0,needsReview=0;
-  const status=()=>document.getElementById('ratingsSyncStatus');
-  const report=message=>{if(status())status().textContent=message;};
-  if(!jobs.length){const pendingReview=privateRows.filter(x=>x.ratingsStatus==='needs_review').length;report(publicRows.length?'Внешние оценки актуальны. На ручной проверке: '+pendingReview+'.':'В медиатеке пока нет опубликованных произведений.');return {updated,failed,skipped,needsReview:pendingReview};}
-  report('Обновляем оценки: 0 из '+jobs.length+'…');
-  for(let i=0;i<jobs.length;i++){
-   const pub=jobs[i],record=privateById.get(pub.id);
-   if(!record){skipped++;report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed+' · пропущено '+skipped);continue;}
+  const cutoff=Date.now()-30*86400000,privateById=new Map(privateRows.map(x=>[x.id,x]));
+  const jobs=publicRows.filter(pub=>{const r=privateById.get(pub.id);if(!r||r.ratingsStatus==='needs_review')return false;const fetched=Date.parse(pub.ratingsUpdatedAt||r.ratingsUpdatedAt||'');return force||r.ratingsStatus!=='ready'||(pub.kinopoiskRating==null&&pub.imdbRating==null)||!Number.isFinite(fetched)||fetched<cutoff;}).sort((a,b)=>(Date.parse(a.ratingsUpdatedAt||'')||0)-(Date.parse(b.ratingsUpdatedAt||'')||0));
+  const batch=jobs.slice(0,10),deferred=Math.max(0,jobs.length-batch.length);let updated=0,failed=0,needsReview=0,budgetStopped=false;
+  const report=t=>{const el=document.getElementById('ratingsSyncStatus');if(el)el.textContent=t;};
+  if(!jobs.length){report('Внешние данные актуальны. Карточек на ручной проверке: '+privateRows.filter(x=>x.ratingsStatus==='needs_review').length+'.');return {updated,failed,needsReview,deferred:0};}
+  report('Обновляем данные: 0 из '+batch.length+' карточек…');
+  for(let i=0;i<batch.length;i++){
+   const pub=batch[i],record=privateById.get(pub.id);
    try{
     if(!record.kinopoiskId&&pub.kinopoiskId)record.kinopoiskId=pub.kinopoiskId;
     const result=await resolveMetadata(record,{providerId:pub.kinopoiskId,persist:false});
-    if(result?.status==='needs_review'){
-     // Candidate list and review state are already persisted in kinoteka_metadata.
-     // Do not republish a public card just to store an internal review flag.
-     record.ratingsStatus='needs_review';
-     ratingsReviewById.set(record.id,{reason:result.reason||null,candidates:Array.isArray(result.candidates)?result.candidates:[],checkedAt:new Date().toISOString()});
-     needsReview++;
-    }else{
-     if(result?.status!=='ready')throw Error('metadata_not_ready');
-     record.ratingsStatus='ready';
-     ratingsReviewById.delete(record.id);
+    if(result?.status==='needs_review'){record.ratingsStatus='needs_review';ratingsReviewById.set(record.id,{reason:result.reason||null,candidates:result.candidates||[],checkedAt:new Date().toISOString()});needsReview++;}
+    else if(result?.status==='ready'){
+     record.ratingsStatus='ready';ratingsReviewById.delete(record.id);
      const version=await rpc('nuglyan_commit_card',{p_id:record.id,p_version:versions.get(record.id).version,p_title:str(record.draft?.name||record.name).trim(),p_original_json:JSON.stringify(cleanRecord(record)),p_action:'publish',p_card:snapshot(record)},true);
-     versions.get(record.id).version=version;
-     updated++;
-    }
-   }catch(e){failed++;console.warn('Не удалось обновить оценки для '+pub.name+':',e);}
-   report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed+' · пропущено '+skipped);
-   await new Promise(resolve=>setTimeout(resolve,180));
+     versions.get(record.id).version=version;updated++;
+    }else throw Error('metadata_not_ready');
+   }catch(error){if(String(error?.message||'').includes('budget_exhausted')){budgetStopped=true;break;}failed++;console.warn('Metadata update failed for '+pub.name,error);}
+   report('Обновляем данные: '+(i+1)+' из '+batch.length+' · успешно '+updated+' · на проверке '+needsReview+' · ошибок '+failed);
+   await new Promise(resolve=>setTimeout(resolve,220));
   }
-  await loadPublic();
-  const route=location.hash.slice(1).split('/')[0];
-  if(route==='library'){render();report('Готово: обновлено '+updated+' из '+jobs.length+'. На ручной проверке: '+needsReview+'. Ошибок: '+failed+'.');}
-  else if(route==='title'){db=publicRows;kpIndex=publicIndex;render();}
-  else if(route!=='edit'){db=publicRows;kpIndex=publicIndex;}
-  return {updated,failed,skipped,needsReview};
- })().finally(()=>{ratingRefreshTask=null;});
- return ratingRefreshTask;
+  await loadPublic();await hydratePrivate();
+  if(location.hash==='#library'){render();report('Готово: обновлено '+updated+'. На проверке '+needsReview+'. Ошибок '+failed+'. Отложено '+deferred+'.'+(budgetStopped?' Дневной лимит исчерпан.':''));}
+  return {updated,failed,needsReview,deferred,budgetStopped};
+ })().finally(()=>{ratingRefreshTask=null;});return ratingRefreshTask;
 }
-
 startCard=function(){
   app.innerHTML='<h1>Новое произведение</h1><form class="panel createCard"><label>Название<input name="title" required autocomplete="off"></label><label>Формат<select name="kind"><option>Сериал</option><option>Фильм</option></select></label><button class="primary">Добавить в медиатеку</button><p role="status"></p></form>';
   const form=app.querySelector('form');form.onsubmit=async e=>{e.preventDefault();if(!admin||busy)return;
