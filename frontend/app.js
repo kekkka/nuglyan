@@ -79,7 +79,7 @@ function bindEditor(record) {
   const status = document.createElement('p');
   status.className = 'saveStatus';
   status.setAttribute('role','status');
-  status.textContent = 'Черновик сохраняется на сервере';
+  status.textContent = 'Изменения автоматически сохраняются на сервере';
   editor.prepend(status);
   updateProgress(editor);
   const last = record.draft?.lastQuestion;
@@ -119,10 +119,16 @@ function bindEditor(record) {
     try {
       queueDraft(record,status);
     } catch {
-      status.textContent = 'Не удалось сохранить в браузере. Оставь страницу открытой и скопируй текст.';
+      status.textContent = 'Не удалось поставить изменения в очередь сохранения. Оставь страницу открытой и скачай резервную копию.';
     }
   }
-  editor.addEventListener('input',persist);
+  editor.addEventListener('input',event=>{
+    if(event.target.tagName==='SELECT'||event.target.type==='checkbox')return;
+    persist(event);
+  });
+  editor.addEventListener('change',event=>{
+    if(event.target.tagName==='SELECT'||event.target.type==='checkbox')persist(event);
+  });
 }
 
 function startCard() {

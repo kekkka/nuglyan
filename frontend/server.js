@@ -1,8 +1,10 @@
 /* nuglyan: browser-to-Supabase adapter. No secret/service role key. */
 const BASE='https://ezycipkttvaoasftqpug.supabase.co';
 const KEY='sb_publishable_9XR2EtcnLTfxUj4l8iLYOA_VVV0oGFn';
-let session=null, admin=false, publicRows=[], privateRows=[], publicIndex={}, privateIndex={}, ready=false, refreshTask=null, busy=false, ratingsReviewById=new Map();
-const pending=new Map(), versions=new Map();
+let sessionStorageRef=null;try{sessionStorageRef=window.sessionStorage;}catch{}
+const sessionStore=window.NuglyanSessionStore.create(sessionStorageRef);
+let session=null, admin=false, publicRows=[], privateRows=[], publicIndex={}, privateIndex={}, ready=false, refreshTask=null, busy=false, ratingsReviewById=new Map(), sessionRestoreMessage='';
+const versions=new Map();
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const copy=v=>JSON.parse(JSON.stringify(v));
 const str=v=>typeof v==='string'?v:'';
@@ -19,10 +21,10 @@ async function request(path,{method='GET',body,auth=false,prefer}={}){
   if(!res.ok){const e=Error('Запрос не выполнен ('+res.status+')');e.status=res.status;throw e;}
   return res.status===204?null:res.json();
 }
-function acceptSession(s){if(!s?.access_token||!s.refresh_token)throw Error('Сессия не получена');session={access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at||Date.now()/1000+(s.expires_in||3600)};}
+function acceptSession(s){if(!s?.access_token||!s.refresh_token)throw Error('Сессия не получена');session={access_token:s.access_token,refresh_token:s.refresh_token,expires_at:s.expires_at||Date.now()/1000+(s.expires_in||3600)};sessionStore.write(session);}
 async function refreshSession(){
   if(!session)throw Error('Сессия завершена');
-  if(!refreshTask)refreshTask=request('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:{refresh_token:session.refresh_token}}).then(acceptSession).finally(()=>{refreshTask=null;});
+  if(!refreshTask)refreshTask=request('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:{refresh_token:session.refresh_token}}).then(acceptSession).catch(error=>{if([400,401,403].includes(error.status)){session=null;sessionStore.clear();}throw error;}).finally(()=>{refreshTask=null;});
   return refreshTask;
 }
 function publicRecord(row){
@@ -77,6 +79,23 @@ async function hydratePrivate(){
     if(!privateIndex[record.id]&&pub.kinopoiskId)privateIndex[record.id]=sourceFor(pub.kinopoiskId,{fields:{...pub.legacyFacts,watchUrl:pub.watchUrl}});
   }
 }
+async function restoreAdminSession(){
+  const stored=sessionStore.read();
+  if(!stored)return false;
+  session=stored;
+  try{
+    if(session.expires_at<=Date.now()/1000+60)await refreshSession();
+    admin=(await rpc('kinoteka_is_admin',{},true))===true;
+    if(!admin){session=null;sessionStore.clear();return false;}
+    await hydratePrivate();
+    return true;
+  }catch(error){
+    admin=false;session=null;
+    if([400,401,403].includes(error.status))sessionStore.clear();
+    else sessionRestoreMessage='Не удалось автоматически восстановить вход. Проверь соединение и войди повторно.';
+    return false;
+  }
+}
 function cleanRecord(record){
   const d=copy(record),v=versions.get(record.id);
   if(v?.legacyId!=null)d.id=v.legacyId;
@@ -101,40 +120,33 @@ async function writeRecord(record){
   if(!v)throw Error('Карточка не зарегистрирована');
   const title=str(record.draft?.name||record.name).trim()||str(record.name).trim()||'Без названия';
   const result=await request('/rest/v1/kinoteka_entries?id=eq.'+record.id+'&version=eq.'+v.version+'&select=id,version',{method:'PATCH',auth:true,prefer:'return=representation',body:{title,original_json:JSON.stringify(cleanRecord(record))}});
-  if(!Array.isArray(result)||result.length!==1)throw Error('Конфликт версий: данные на сервере изменились. Скачайте копию и войдите заново.');
+  if(!Array.isArray(result)||result.length!==1){const error=Error('Конфликт версий: карточка изменилась в другой вкладке. Сервер не перезаписал чужие изменения. Скачай резервную копию и сверь изменения.');error.status=409;error.code='version_conflict';throw error;}
   v.version=result[0].version;return v.version;
 }
-function getPending(record){if(!pending.has(record.id))pending.set(record.id,{timer:null,tail:Promise.resolve(),dirty:false,record,error:null});return pending.get(record.id);}
-function flush(record){
-  const p=getPending(record);clearTimeout(p.timer);p.timer=null;
-  const task=p.tail.catch(()=>{}).then(async()=>{
-    if(!p.dirty)return versions.get(record.id)?.version;
-    p.dirty=false;p.saving=true;try{const v=await writeRecord(copy(record));p.error=null;return v;}catch(e){p.dirty=true;p.error=e;throw e;}finally{p.saving=false;}
-  });
-  p.tail=task;return task;
-}
-function queueDraft(record,status){
-  const p=getPending(record);p.dirty=true;clearTimeout(p.timer);
-  status.textContent='Есть несохранённые изменения…';
-  p.timer=setTimeout(()=>{flush(record).then(()=>{if(!p.dirty)status.textContent='Черновик сохранён на сервере';}).catch(e=>{status.textContent=e.message+' Текст остался на странице; скачайте резервную копию.';});},650);
-}
-function unsaved(){return [...pending.values()].some(p=>p.dirty||p.saving);}
+const draftQueue=window.NuglyanDraftQueue.create({
+  save:record=>writeRecord(copy(record)),
+  shouldRetry:error=>![400,401,403,404,409].includes(error?.status),
+  delay:650,maxRetries:3
+});
+function queueDraft(record,status){draftQueue.queue(record,status);}
+function flush(record){return draftQueue.flush(record);}
+function unsaved(){return draftQueue.hasUnsaved();}
 function downloadBackup(){
   if(!admin)return;
   const blob=new Blob([JSON.stringify(privateRows.map(cleanRecord),null,2)],{type:'application/json'});
   const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='nuglyan-private-backup.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 function loginScreen(message=''){
-  app.innerHTML='<h1>Личный кабинет</h1><p class="muted">Редактировать медиатеку может только администратор.</p><form id="signin" class="panel createCard"><label>Email<input type="email" name="email" autocomplete="username" required></label><label>Пароль<input type="password" name="password" autocomplete="current-password" required></label><button class="primary">Войти</button><p role="status">'+esc(message)+'</p></form>';
+  app.innerHTML='<h1>Личный кабинет</h1><p class="muted">Редактировать медиатеку может только администратор.</p><form id="signin" class="panel createCard"><label>Email<input type="email" name="email" autocomplete="username" required></label><label>Пароль<input type="password" name="password" autocomplete="current-password" required></label><button class="primary">Войти</button><p role="status">'+esc(message||sessionRestoreMessage)+'</p></form>';
   const form=app.querySelector('#signin');
   form.onsubmit=async e=>{e.preventDefault();const b=form.querySelector('button'),s=form.querySelector('[role=status]');b.disabled=true;s.textContent='Вход…';
-    try{acceptSession(await request('/auth/v1/token?grant_type=password',{method:'POST',body:{email:form.elements.email.value,password:form.elements.password.value}}));admin=(await rpc('kinoteka_is_admin',{},true))===true;if(!admin)throw Error('Доступ не предоставлен');await loadPublic();await hydratePrivate();render();refreshPublishedRatings().catch(e=>console.warn('Rating refresh:',e));}catch(e){session=null;admin=false;privateRows=[];privateIndex={};versions.clear();s.textContent=e.message;}finally{b.disabled=false;form.elements.password.value='';}};
+    try{acceptSession(await request('/auth/v1/token?grant_type=password',{method:'POST',body:{email:form.elements.email.value,password:form.elements.password.value}}));admin=(await rpc('kinoteka_is_admin',{},true))===true;if(!admin)throw Error('Доступ не предоставлен');sessionRestoreMessage='';await loadPublic();await hydratePrivate();render();refreshPublishedRatings().catch(e=>console.warn('Rating refresh:',e));}catch(e){session=null;sessionStore.clear();admin=false;privateRows=[];privateIndex={};versions.clear();s.textContent=e.message;}finally{b.disabled=false;form.elements.password.value='';}};
 }
 async function signout(){
   if(busy)return;
-  try{await Promise.all([...pending.values()].map(p=>flush(p.record)));}catch(e){alert('Сначала сохраните или скачайте копию: '+e.message);return;}
+  try{await draftQueue.flushAll();}catch(e){alert('Сначала сохраните или скачайте копию: '+e.message);return;}
   try{await request('/auth/v1/logout',{method:'POST',auth:true});}catch(e){/* local sign-out regardless */}
-  session=null;admin=false;privateRows=[];privateIndex={};ratingsReviewById.clear();versions.clear();pending.clear();window.current=null;go('');render();
+  session=null;sessionStore.clear();admin=false;privateRows=[];privateIndex={};ratingsReviewById.clear();versions.clear();window.current=null;go('');render();
 }
 const originalLibrary=library,originalEdit=edit;
 function ratingCandidateWarnings(record,candidate){
@@ -208,7 +220,7 @@ commit=async function(pub){
   if(pub&&!confirm('Опубликовать рецензию и ответы анкеты? Личные заметки и черновики останутся закрытыми.'))return;
   busy=true;editor.querySelectorAll('button,input,textarea,select').forEach(e=>e.disabled=true);
   try{
-    x.draft=d;getPending(x).dirty=true;await flush(x);
+    x.draft=d;queueDraft(x,feedback);await flush(x);
     if(pub){const published={...d,pub:true};delete published.draft;try{const meta=await resolveMetadata(published,{persist:false});if(meta?.status==='ready'){privateIndex[x.id]=sourceFor(meta.metadata.kinopoiskId,{fields:meta.metadata});published.kinopoiskId=String(meta.metadata.kinopoiskId);published.kinopoiskRating=meta.metadata.kinopoiskRating??null;published.imdbRating=meta.metadata.imdbRating??null;}}catch(e){console.warn('Kinopoisk matching skipped:',e.message);}const version=await rpc('nuglyan_commit_card',{p_id:x.id,p_version:versions.get(x.id).version,p_title:published.name.trim(),p_original_json:JSON.stringify(cleanRecord(published)),p_action:'publish',p_card:snapshot(published)},true);versions.get(x.id).version=version;Object.assign(x,published);delete x.draft;feedback.textContent='Карточка опубликована';try{await loadPublic();go('title/'+x.id);}catch(e){feedback.textContent='Карточка опубликована. Не удалось обновить каталог; обновите страницу.';}}
     else feedback.textContent='Черновик сохранён на сервере';
   }catch(e){feedback.textContent=e.message+'; скачайте резервную копию при необходимости.';}
@@ -434,5 +446,6 @@ catalog=function(){
 };
 
 window.addEventListener('beforeunload',e=>{if(unsaved()||busy){e.preventDefault();e.returnValue='';}});
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'&&draftQueue.hasUnsaved())draftQueue.flushAll().catch(e=>console.warn('Draft flush:',e));});
 window.addEventListener('hashchange',()=>{render();scrollTo(0,0);});
-(async()=>{try{await loadPublic();ready=true;render();}catch(e){app.innerHTML='<p class="panel">Не удалось загрузить каталог. <button onclick="location.reload()">Повторить</button></p>';}})();
+(async()=>{try{await loadPublic();await restoreAdminSession();ready=true;render();}catch(e){app.innerHTML='<p class="panel">Не удалось загрузить каталог. <button onclick="location.reload()">Повторить</button></p>';}})();
