@@ -54,7 +54,7 @@ async function hydratePrivate(){
   const [rows,meta]=await Promise.all([readAll('/rest/v1/kinoteka_entries?select=id,source_key,original_json,version&order=created_at.desc,id',true),readAll('/rest/v1/kinoteka_metadata?select=entry_id,metadata,provider_id,status&order=entry_id',true)]);
   const published=new Set(publicRows.map(x=>x.id));
   privateIndex={};versions.clear();
-  for(const m of meta){const k=sourceFor(m.metadata?.legacy?.id||m.provider_id,m.metadata?.legacy);if(k)privateIndex[m.entry_id]=k;}
+  for(const m of meta){const k=sourceFor(m.provider_id,m.metadata?.legacy||{fields:m.metadata||{}});if(k)privateIndex[m.entry_id]=k;}
   privateRows=rows.filter(x=>uuid(x.id)).map(row=>{
     const original=JSON.parse(row.original_json);versions.set(row.id,{version:row.version,source_key:row.source_key,legacyId:original.id});
     return {...original,id:row.id,pub:published.has(row.id)};
@@ -140,7 +140,7 @@ commit=async function(pub){
   busy=true;editor.querySelectorAll('button,input,textarea,select').forEach(e=>e.disabled=true);
   try{
     x.draft=d;getPending(x).dirty=true;await flush(x);
-    if(pub){const published={...d,pub:true};delete published.draft;const version=await rpc('nuglyan_commit_card',{p_id:x.id,p_version:versions.get(x.id).version,p_title:published.name.trim(),p_original_json:JSON.stringify(cleanRecord(published)),p_action:'publish',p_card:snapshot(published)},true);versions.get(x.id).version=version;Object.assign(x,published);delete x.draft;feedback.textContent='Карточка опубликована';try{await loadPublic();go('title/'+x.id);}catch(e){feedback.textContent='Карточка опубликована. Не удалось обновить каталог; обновите страницу.';}}
+    if(pub){const published={...d,pub:true};delete published.draft;try{const meta=await resolveMetadata(published);if(meta?.status==='ready'){privateIndex[x.id]=sourceFor(meta.metadata.kinopoiskId,{fields:meta.metadata});published.kinopoiskId=String(meta.metadata.kinopoiskId);published.kinopoiskRating=meta.metadata.kinopoiskRating??null;published.imdbRating=meta.metadata.imdbRating??null;}}catch(e){console.warn('Kinopoisk matching skipped:',e.message);}const version=await rpc('nuglyan_commit_card',{p_id:x.id,p_version:versions.get(x.id).version,p_title:published.name.trim(),p_original_json:JSON.stringify(cleanRecord(published)),p_action:'publish',p_card:snapshot(published)},true);versions.get(x.id).version=version;Object.assign(x,published);delete x.draft;feedback.textContent='Карточка опубликована';try{await loadPublic();go('title/'+x.id);}catch(e){feedback.textContent='Карточка опубликована. Не удалось обновить каталог; обновите страницу.';}}
     else feedback.textContent='Черновик сохранён на сервере';
   }catch(e){feedback.textContent=e.message+'; скачайте резервную копию при необходимости.';}
   finally{busy=false;editor.querySelectorAll('button,input,textarea,select').forEach(e=>e.disabled=false);}
@@ -150,13 +150,29 @@ unpublish=async function(){
   const x=window.current;if(!confirm('Снять карточку с публикации?'))return;busy=true;
   try{await flush(x);const next={...x,pub:false};const version=await rpc('nuglyan_commit_card',{p_id:x.id,p_version:versions.get(x.id).version,p_title:(next.draft?.name||next.name).trim(),p_original_json:JSON.stringify(cleanRecord(next)),p_action:'unpublish',p_card:null},true);versions.get(x.id).version=version;x.pub=false;try{await loadPublic();}catch(e){alert('Публикация снята, но каталог не обновился. Обновите страницу.');}go('library');}catch(e){alert(e.message);}finally{busy=false;}
 };
+async function resolveMetadata(record){
+ if(!admin||!session||!record?.id)return null;
+ const year=Number(record.draft?.year||record.year);
+ const body={action:'search',entryId:record.id,year:Number.isInteger(year)&&year>=1880&&year<=2100?year:null,isSeries:record.kind==='Сериал'};
+ const response=await fetch(BASE+'/functions/v1/nuglyan-metadata',{method:'POST',headers:{apikey:KEY,Authorization:'Bearer '+session.access_token,'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'});
+ if(!response.ok)throw Error('Не удалось найти карточку Кинопоиска');
+ const result=await response.json();
+ if(result.status==='ready'&&result.metadata?.kinopoiskId){
+   privateIndex[record.id]=sourceFor(result.metadata.kinopoiskId,{fields:result.metadata});
+   record.kinopoiskId=String(result.metadata.kinopoiskId);
+   record.kinopoiskRating=result.metadata.kinopoiskRating??null;
+   record.imdbRating=result.metadata.imdbRating??null;
+   return result;
+ }
+ return result;
+}
 startCard=function(){
   app.innerHTML='<h1>Новое произведение</h1><form class="panel createCard"><label>Название<input name="title" required autocomplete="off"></label><label>Формат<select name="kind"><option>Сериал</option><option>Фильм</option></select></label><button class="primary">Добавить в медиатеку</button><p role="status"></p></form>';
   const form=app.querySelector('form');form.onsubmit=async e=>{e.preventDefault();if(!admin||busy)return;
     const name=form.elements.title.value.trim(),kind=form.elements.kind.value;if(!name)return;
     const existing=privateRows.find(x=>str(x.draft?.name||x.name).trim().toLowerCase()===name.toLowerCase()&&x.kind===kind);if(existing){go('edit/'+existing.id);return;}
     const x={id:crypto.randomUUID(),name,kind,pub:false};busy=true;const b=form.querySelector('button');b.disabled=true;
-    try{const rows=await request('/rest/v1/kinoteka_entries?select=id,version',{method:'POST',auth:true,prefer:'return=representation',body:{id:x.id,source_key:'user:'+x.id,title:name,original_json:JSON.stringify(x)}});if(rows?.length!==1)throw Error('Создание не подтверждено');versions.set(x.id,{version:rows[0].version,source_key:'user:'+x.id,legacyId:x.id});privateRows.unshift(x);go('edit/'+x.id);}catch(e){form.querySelector('[role=status]').textContent=e.message;}finally{busy=false;b.disabled=false;}
+    try{const rows=await request('/rest/v1/kinoteka_entries?select=id,version',{method:'POST',auth:true,prefer:'return=representation',body:{id:x.id,source_key:'user:'+x.id,title:name,original_json:JSON.stringify(x)}});if(rows?.length!==1)throw Error('Создание не подтверждено');versions.set(x.id,{version:rows[0].version,source_key:'user:'+x.id,legacyId:x.id});privateRows.unshift(x);go('edit/'+x.id);resolveMetadata(x).catch(()=>{});}catch(e){form.querySelector('[role=status]').textContent=e.message;}finally{busy=false;b.disabled=false;}
   };
 };
 loadExtras=async function(record,editing){
