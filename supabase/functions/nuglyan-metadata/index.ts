@@ -67,14 +67,14 @@ Deno.serve(async(req)=>{
   if(!token)return out(503,{error:"provider_secret_missing"});
   const provider=async(path:string)=>{
    let last="provider_empty_response";
-   for(let attempt=0;attempt<3;attempt++){
+   for(let attempt=0;attempt<2;attempt++){
     const reserved=await db("rpc/kinoteka_reserve_metadata_request",{method:"POST",body:"{}"});
     if(reserved!==true)throw new Error("budget_exhausted");
     try{
      const r=await fetch("https://eu-api.poiskkino.dev/v1.5/"+path,{headers:{"X-API-KEY":token,"Accept":"application/json"},signal:AbortSignal.timeout(15000),redirect:"error"});
      if(!r.ok){
       const code="provider_"+r.status;
-      if((r.status===429||r.status>=500)&&attempt<2){last=code;await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));continue;}
+      if((r.status===429||r.status>=500)&&attempt<1){last=code;await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));continue;}
       throw new Error(code);
      }
      const raw=await r.text();
@@ -82,8 +82,8 @@ Deno.serve(async(req)=>{
      try{return JSON.parse(raw);}catch{throw new Error("provider_invalid_json");}
     }catch(e){
      const code=e instanceof Error?e.message:"provider_network";
-     const retryable=code==="provider_empty_response"||code==="provider_invalid_json"||code==="provider_network"||code==="TimeoutError"||code==="TypeError"||code==="provider_429"||/^provider_5\\d\\d$/.test(code);
-     if(!retryable||attempt>=2)throw e;
+     const retryable=code==="provider_empty_response"||code==="provider_invalid_json"||code==="provider_network"||code==="TimeoutError"||code==="TypeError"||code==="provider_429"||/^provider_5\d\d$/.test(code);
+     if(!retryable||attempt>=1)throw e;
      last=code;await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));
     }
    }
@@ -145,5 +145,5 @@ Deno.serve(async(req)=>{
   if(cache?.status!=="needs_review"||cache.metadata?.fingerprint!==fingerprint||!cache.metadata?.candidates?.some((x:any)=>x.kinopoiskId===b.providerId))return out(409,{error:"select_from_current_candidates"});
   const m=await provider("movie/"+b.providerId);if(m.id!==b.providerId||(year!==null&&m.year!==year)||!matchesKind(m,series,true)||![m.name,m.alternativeName,m.enName].some(n=>normalize(n)===normalize(entry.title)))throw new Error("provider_identity_mismatch");
   const metadata={...fields(m),watchUrl:await findWatchUrl(m.id,m.name),fingerprint,fetchedAt:new Date().toISOString()};await save("ready",metadata,m.id);return out(200,{status:"ready",metadata});
- }catch(e){const code=e instanceof Error?e.message:"unexpected";console.error("nuglyan-metadata request failed",code);const safe=/^(budget_exhausted|provider_\d{3}|provider_schema|provider_identity_mismatch|version_conflict|database_\d{3})$/.test(code)?code:"request_failed";return out(safe==="budget_exhausted"?429:safe==="version_conflict"?409:502,{error:safe});}
+ }catch(e){const code=e instanceof Error?e.message:"unexpected";console.error("nuglyan-metadata request failed",code);const safe=/^(budget_exhausted|provider_\d{3}|provider_schema|provider_identity_mismatch|provider_(?:empty_response|invalid_json|network|id_mismatch|year_mismatch|kind_mismatch|title_mismatch)|version_conflict|database_\d{3}|database_invalid_json)$/.test(code)?code:"request_failed";return out(safe==="budget_exhausted"?429:safe==="version_conflict"?409:502,{error:safe});}
 });
