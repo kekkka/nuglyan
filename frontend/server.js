@@ -183,23 +183,24 @@ async function resolveMetadata(record,options={}){
 }
 let ratingRefreshTask=null;
 async function refreshPublishedRatings(force=false){
- if(!admin||!session)return {updated:0,failed:0};
+ if(!admin||!session){const el=document.getElementById('ratingsSyncStatus');if(el)el.textContent='Сначала войдите в личный кабинет администратора.';return {updated:0,failed:0};}
  if(ratingRefreshTask)return ratingRefreshTask;
  ratingRefreshTask=(async()=>{
   const cutoff=Date.now()-30*24*60*60*1000;
-  const jobs=publicRows.filter(x=>{
-   if(!x.kinopoiskId)return false;
+  const mapped=publicRows.filter(x=>x.kinopoiskId);
+  const jobs=mapped.filter(x=>{
    const fetched=Date.parse(x.ratingsUpdatedAt||'');
-   return force||!Number.isFinite(fetched)||fetched<cutoff;
+   const bothMissing=x.kinopoiskRating==null&&x.imdbRating==null;
+   return force||bothMissing||!Number.isFinite(fetched)||fetched<cutoff;
   });
   let updated=0,failed=0,skipped=0;
   const status=()=>document.getElementById('ratingsSyncStatus');
   const report=message=>{if(status())status().textContent=message;};
-  if(!jobs.length){report('Внешние оценки уже актуальны.');return {updated,failed,skipped};}
+  if(!jobs.length){report(mapped.length?'Внешние оценки уже актуальны.':'Не найдено произведений с подтверждённым ID Кинопоиска.');return {updated,failed,skipped};}
   report('Обновляем оценки: 0 из '+jobs.length+'…');
   for(let i=0;i<jobs.length;i++){
    const pub=jobs[i],record=privateRows.find(x=>x.id===pub.id);
-   if(!record){skipped++;continue;}
+   if(!record){skipped++;report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · ошибок '+failed+' · пропущено '+skipped);continue;}
    try{
     if(!record.kinopoiskId)record.kinopoiskId=pub.kinopoiskId;
     const result=await resolveMetadata(record,{providerId:pub.kinopoiskId,persist:false});
@@ -208,7 +209,7 @@ async function refreshPublishedRatings(force=false){
     versions.get(record.id).version=version;
     updated++;
    }catch(e){failed++;console.warn('Не удалось обновить оценки для '+pub.name+':',e);}
-   report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · ошибок '+failed);
+   report('Обновляем оценки: '+(i+1)+' из '+jobs.length+' · успешно '+updated+' · ошибок '+failed+' · пропущено '+skipped);
    await new Promise(resolve=>setTimeout(resolve,180));
   }
   await loadPublic();
